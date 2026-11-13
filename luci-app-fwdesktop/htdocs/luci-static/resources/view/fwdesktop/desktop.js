@@ -7,7 +7,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-9';
+const ASSET_REV = '1.0.0-10';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -331,7 +331,11 @@ return view.extend({
 		this.svg.addEventListener('wheel', ev => this.onWheel(ev), { passive: false });
 
 		this.canvasWrap = E('div', {}, [
-			this.canvasBox = E('div', { 'class': 'fwd-canvas-wrap' }, [ this.svg, this.tooltip = E('div', { 'class': 'fwd-tooltip' }) ]),
+			this.canvasBox = E('div', { 'class': 'fwd-canvas-wrap' }, [
+				this.svg,
+				this.tooltip = E('div', { 'class': 'fwd-tooltip' }),
+				this.infoCard = E('div', { 'class': 'fwd-infocard' })
+			]),
 			E('div', { 'class': 'fwd-hint' }, [
 				E('span', [ _('Drag objects to move them · drag from the blue dot to connect · double-click to edit · drag background to pan, wheel to zoom') ]),
 				E('span', { 'class': 'fwd-legend' }, [
@@ -359,6 +363,130 @@ return view.extend({
 
 	applyPan() {
 		this.layer.setAttribute('transform', 'translate(%f,%f) scale(%f)'.format(this.pan.x, this.pan.y, this.pan.k));
+		this.positionInfoCard();
+	},
+
+	/* --- interface info card for zones and the router ------------------- */
+
+	showInfoCard(id) {
+		this.infoId = id;
+		this.hideTooltip();
+		dom.content(this.infoCard, E('em', [ _('Loading interfaces…') ]));
+		this.infoCard.classList.add('visible');
+		this.positionInfoCard();
+
+		L.resolveDefault(callNetworkDump(), this.ifaces).then(ifaces => {
+			this.ifaces = ifaces || [];
+			if (this.infoId != id)
+				return;
+			dom.content(this.infoCard, this.renderInfoCard(this.model.objects[id]));
+			this.positionInfoCard();
+		});
+	},
+
+	hideInfoCard() {
+		this.infoId = null;
+		if (this.infoCard)
+			this.infoCard.classList.remove('visible');
+	},
+
+	positionInfoCard() {
+		const o = this.infoId && this.model.objects[this.infoId];
+		if (!o || !this.infoCard) {
+			this.hideInfoCard();
+			return;
+		}
+		const r = this.canvasBox.getBoundingClientRect();
+		const k = this.pan.k;
+		const cw = this.infoCard.offsetWidth || 320, ch = this.infoCard.offsetHeight || 120;
+		let x = this.pan.x + (o.x + NODE_W / 2) * k + 14;
+		let y = this.pan.y + (o.y - NODE_H / 2) * k;
+		if (x + cw > r.width - 8)
+			x = this.pan.x + (o.x - NODE_W / 2) * k - cw - 14;
+		x = Math.max(8, Math.min(x, r.width - cw - 8));
+		y = Math.max(8, Math.min(y, r.height - ch - 8));
+		this.infoCard.style.left = x + 'px';
+		this.infoCard.style.top = y + 'px';
+	},
+
+	renderIface(ifc, zone) {
+		const name = ifc ? ifc.interface : '?';
+		const dev = ifc ? (ifc.l3_device || ifc.device || '') : '';
+		const addrs = [];
+
+		if (ifc) {
+			for (const a of (ifc['ipv4-address'] || []))
+				addrs.push('%s/%d'.format(a.address, a.mask));
+			for (const a of (ifc['ipv6-address'] || []))
+				addrs.push('%s/%d'.format(a.address, a.mask));
+			for (const a of (ifc['ipv6-prefix-assignment'] || []))
+				if (a['local-address'])
+					addrs.push('%s/%d'.format(a['local-address'].address, a['local-address'].mask));
+		}
+
+		return E('tr', { 'class': ifc && !ifc.up ? 'disabled' : '' }, [
+			E('td', {}, [
+				E('strong', [ name ]),
+				E('div', { 'class': 'fwd-tip-sub' }, [ [ dev, ifc ? ifc.proto : _('not configured'), zone ? _('zone %s').format(zone) : '' ].filter(Boolean).join(' · ') ])
+			]),
+			E('td', {}, [
+				E('span', { 'class': 'fwd-pill ' + (ifc && ifc.up ? 'ACCEPT' : 'DROP') }, [ ifc && ifc.up ? _('up') : _('down') ])
+			]),
+			E('td', { 'class': 'fwd-mono' }, addrs.length ? addrs.map(a => E('div', [ a ])) : [ E('em', [ _('no address') ]) ])
+		]);
+	},
+
+	renderInfoCard(o) {
+		const byName = {};
+		for (const ifc of this.ifaces)
+			byName[ifc.interface] = ifc;
+
+		const close = E('button', { 'class': 'fwd-card-close', 'title': _('Close'), 'click': () => this.hideInfoCard() }, [ '×' ]);
+		const zones = uci.sections('firewall', 'zone');
+		const rows = [];
+		const extra = [];
+		let title;
+
+		if (o.type == 'router') {
+			title = _('Interfaces of this router');
+			for (const ifc of this.ifaces) {
+				if (ifc.interface == 'loopback')
+					continue;
+				const z = zones.filter(zs => fwm.toList(zs.network).includes(ifc.interface))[0];
+				rows.push(this.renderIface(ifc, z ? z.name : _('no zone')));
+			}
+		}
+		else {
+			const zs = zones.filter(z => z.name == o.zone)[0];
+			title = _('Zone %s').format(o.zone);
+			if (!zs)
+				return [ close, E('div', { 'class': 'fwd-tip-title' }, [ title ]), E('div', { 'class': 'fwd-problem' }, [ _('This zone does not exist in the firewall configuration.') ]) ];
+
+			for (const net of fwm.toList(zs.network))
+				rows.push(this.renderIface(byName[net] || { interface: net, up: false, proto: _('not configured') }, null));
+
+			const devs = fwm.toList(zs.device), subnets = fwm.toList(zs.subnet);
+			if (devs.length)
+				extra.push(E('div', [ _('Devices: %s').format(devs.join(', ')) ]));
+			if (subnets.length)
+				extra.push(E('div', [ _('Subnets: %s').format(subnets.join(', ')) ]));
+			extra.push(E('div', { 'class': 'fwd-tip-sub' }, [
+				_('Policy: input %s · output %s · forward %s').format(zs.input || 'DROP', zs.output || 'DROP', zs.forward || 'DROP') +
+				(zs.masq == '1' ? ' · ' + _('masquerading') : '')
+			]));
+		}
+
+		return [
+			close,
+			E('div', { 'class': 'fwd-tip-title' }, [ title ]),
+			rows.length ? E('table', {}, rows) : E('em', [ _('No interfaces in this zone.') ]),
+			...extra,
+			E('div', { 'class': 'fwd-card-links' }, [
+				E('a', { 'href': L.url('admin/network/network') }, [ _('Interfaces') ]),
+				' · ',
+				E('a', { 'href': L.url('admin/network/firewall/zones') }, [ _('Zone settings') ])
+			])
+		];
 	},
 
 	toWorld(ev) {
@@ -786,6 +914,8 @@ return view.extend({
 			o.y = snap(p.y - d.dy);
 			d.el.setAttribute('transform', 'translate(%f,%f)'.format(o.x - NODE_W / 2, o.y - NODE_H / 2));
 			this.drawEdges();
+			if (this.infoId == d.id)
+				this.positionInfoCard();
 			break;
 
 		case 'connect':
@@ -823,6 +953,11 @@ return view.extend({
 			else {
 				this.sel = { type: 'node', id: d.id };
 				this.updateSelection();
+				const o = this.model.objects[d.id];
+				if (o && (o.type == 'zone' || o.type == 'router'))
+					this.showInfoCard(d.id);
+				else
+					this.hideInfoCard();
 			}
 			break;
 
@@ -842,9 +977,12 @@ return view.extend({
 			break;
 
 		case 'pan':
-			if (!d.moved && this.sel) {
-				this.sel = null;
-				this.updateSelection();
+			if (!d.moved) {
+				this.hideInfoCard();
+				if (this.sel) {
+					this.sel = null;
+					this.updateSelection();
+				}
 			}
 			break;
 		}

@@ -25,6 +25,8 @@ and `nat` sections.
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it
   to manage them in one dialog, merge connections that only differ in services.
+- **Interface info:** click a zone (or the router) to see its interfaces with
+  device, state and live IPv4/IPv6 addresses.
 - **Zone policies visible:** zone forwardings (e.g. LAN → WAN) and zones with
   input ACCEPT are drawn as dotted lines.
 - **Import** of existing hand written rules and port forwards, including rules

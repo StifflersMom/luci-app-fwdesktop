@@ -349,3 +349,42 @@ body.fwd-max .fwd-canvas-wrap {
 .fwd-tooltip tr.disabled td { opacity: .55; }
 .fwd-tip-title { font-weight: bold; margin-bottom: .3em; }
 .fwd-tip-sub { opacity: .7; font-size: 90%; margin-top: .2em; }
+
+/* --- interface card for zones / router ------------------------------- */
+
+.fwd-infocard {
+	position: absolute;
+	z-index: 6;
+	min-width: 280px;
+	max-width: 520px;
+	max-height: calc(100% - 16px);
+	overflow: auto;
+	padding: .6em .8em;
+	border: 1px solid var(--fwd-node-border);
+	border-radius: 6px;
+	background: var(--fwd-bg, #fff);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, .3);
+	font-size: 90%;
+	display: none;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.fwd-infocard.visible { display: block; }
+.fwd-infocard table { border-collapse: collapse; width: 100%; margin: .3em 0; }
+.fwd-infocard td { padding: .3em .4em; vertical-align: top; border: 0; border-top: 1px solid var(--fwd-node-border); }
+.fwd-infocard tr.disabled td { opacity: .6; }
+.fwd-infocard .fwd-mono { font-family: monospace; white-space: nowrap; }
+.fwd-card-links { margin-top: .5em; font-size: 90%; }
+
+.fwd-card-close {
+	float: right;
+	border: 0;
+	background: none;
+	color: inherit;
+	font-size: 1.3em;
+	line-height: 1;
+	cursor: pointer;
+	padding: 0 0 0 .5em;
+	opacity: .7;
+}
