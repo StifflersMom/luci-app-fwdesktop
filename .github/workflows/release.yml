@@ -1,0 +1,53 @@
+name: release
+
+# Push a tag like v1.0.0-r9 (= PKG_VERSION-rPKG_RELEASE) to build the apk
+# with the official OpenWrt SDK and publish it as a GitHub release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches the package version
+        run: |
+          v=$(sed -n 's/^PKG_VERSION:=//p' luci-app-fwdesktop/Makefile)
+          r=$(sed -n 's/^PKG_RELEASE:=//p' luci-app-fwdesktop/Makefile)
+          test "${GITHUB_REF_NAME}" = "v$v-r$r" || { echo "tag ${GITHUB_REF_NAME} != v$v-r$r"; exit 1; }
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential gawk gettext libncurses-dev python3 python3-setuptools rsync unzip zstd file wget
+
+      - name: Unit tests
+        run: |
+          node tests/model.test.js
+          node tests/import.test.js
+          node tests/ipset.test.js
+
+      - name: Build apk with the OpenWrt SDK
+        id: build
+        run: |
+          apk=$(./scripts/build-apk.sh "$RUNNER_TEMP/sdk" | tail -n1)
+          echo "apk=$apk" >> "$GITHUB_OUTPUT"
+          ls -l "$apk"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.apk }}
+          generate_release_notes: true
+          body: |
+            Install on OpenWrt 25.12:
+
+                apk add --allow-untrusted luci-app-fwdesktop-*.apk
+
+            Then open Network → Firewall Desktop.
