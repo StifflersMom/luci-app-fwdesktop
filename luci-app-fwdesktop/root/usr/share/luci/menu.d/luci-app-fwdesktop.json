@@ -1,0 +1,14 @@
+{
+	"admin/network/fwdesktop": {
+		"title": "Firewall Desktop",
+		"order": 61,
+		"action": {
+			"type": "view",
+			"path": "fwdesktop/desktop"
+		},
+		"depends": {
+			"acl": [ "luci-app-fwdesktop" ],
+			"uci": { "firewall": true }
+		}
+	}
+}

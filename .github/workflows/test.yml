@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Generator, importer and IP set tests
+        run: |
+          node tests/model.test.js
+          node tests/import.test.js
+          node tests/ipset.test.js
+      - name: JavaScript syntax
+        run: |
+          for f in $(find luci-app-fwdesktop/htdocs -name '*.js'); do node --check "$f"; done

@@ -1,0 +1,15 @@
+{
+	"luci-app-fwdesktop": {
+		"description": "Grant access to the object based firewall desktop",
+		"read": {
+			"ubus": {
+				"luci-rpc": [ "getHostHints" ],
+				"network.interface": [ "dump" ]
+			},
+			"uci": [ "firewall", "fwdesktop", "network" ]
+		},
+		"write": {
+			"uci": [ "firewall", "fwdesktop" ]
+		}
+	}
+}
