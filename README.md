@@ -71,6 +71,12 @@ Copy the `.apk` into the image builder's `packages/` directory and add
 `luci-app-fwdesktop` to `PACKAGES`. The image builder indexes and signs local
 packages itself.
 
+### Building the package yourself
+
+`scripts/build-apk.sh` downloads the official OpenWrt 25.12 SDK and builds the
+package (about two minutes). The release workflow uses the same script for
+every `v*` tag.
+
 ## How it works
 
 - The model lives in `/etc/config/fwdesktop` (`object`, `service` and

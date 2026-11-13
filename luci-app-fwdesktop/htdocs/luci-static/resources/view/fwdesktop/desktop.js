@@ -7,7 +7,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-8';
+const ASSET_REV = '1.0.0-9';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
