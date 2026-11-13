@@ -3,6 +3,8 @@
 An object based firewall editor for **OpenWrt 25.12** (fw4 / nftables), built as a
 modern client side LuCI app.
 
+(It's BETA! backup your /etc/config/firewall before testing)
+
 Instead of editing rule lists, you place **objects** on a desktop (hosts, networks,
 zones, groups, IP sets, the router itself) and draw **connections** between them.
 Each connection carries services, an action (allow / reject / drop), optional NAT
