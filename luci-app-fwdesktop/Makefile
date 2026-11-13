@@ -10,7 +10,7 @@ LUCI_DEPENDS:=+luci-base +luci-app-firewall +firewall4
 LUCI_PKGARCH:=all
 
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=8
+PKG_RELEASE:=9
 
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=Klaus <StifflersMom@users.noreply.github.com>
