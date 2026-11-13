@@ -1,0 +1,351 @@
+/* Firewall desktop - layout and canvas styling */
+
+.fwd-root {
+	--fwd-accept: #2e9d5b;
+	--fwd-reject: #d9822b;
+	--fwd-drop: #c93c3c;
+	--fwd-muted: #8a8f98;
+	--fwd-accent: #3a7bd5;
+	--fwd-node-bg: rgba(127, 127, 127, .08);
+	--fwd-node-border: rgba(127, 127, 127, .45);
+	--fwd-grid: rgba(127, 127, 127, .14);
+}
+
+.fwd-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: .4em;
+	align-items: center;
+	margin: .5em 0;
+}
+
+.fwd-toolbar .fwd-sep {
+	width: 1px;
+	align-self: stretch;
+	background: var(--fwd-node-border);
+	margin: 0 .3em;
+}
+
+.fwd-toolbar .fwd-spacer { flex: 1; }
+
+.fwd-status {
+	font-size: 90%;
+	opacity: .8;
+}
+
+.fwd-canvas-wrap {
+	position: relative;
+	border: 1px solid var(--fwd-node-border);
+	border-radius: 6px;
+	overflow: hidden;
+	height: calc(100vh - 290px);
+	min-height: 420px;
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.fwd-canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+	cursor: grab;
+}
+
+.fwd-canvas.fwd-panning { cursor: grabbing; }
+
+.fwd-hint {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	gap: .5em 1em;
+	margin-top: .4em;
+	font-size: 85%;
+	opacity: .75;
+}
+
+.fwd-legend {
+	display: flex;
+	gap: 1em;
+}
+
+.fwd-legend span::before {
+	content: '';
+	display: inline-block;
+	width: 1.6em;
+	height: 3px;
+	vertical-align: middle;
+	margin-right: .35em;
+	background: currentColor;
+}
+
+.fwd-legend .accept { color: var(--fwd-accept); }
+.fwd-legend .reject { color: var(--fwd-reject); }
+.fwd-legend .drop   { color: var(--fwd-drop); }
+.fwd-legend .policy { color: var(--fwd-accept); }
+.fwd-legend .policy::before { background: none; border-top: 3px dotted currentColor; height: 0; }
+
+/* --- SVG elements ---------------------------------------------------- */
+
+.fwd-canvas text {
+	pointer-events: none;
+	fill: currentColor;
+	font-size: 12px;
+	font-family: inherit;
+}
+
+.fwd-node { cursor: move; }
+
+.fwd-node .fwd-box {
+	fill: var(--fwd-bg, #fff);
+	stroke: var(--fwd-node-border);
+	stroke-width: 1.2;
+}
+
+.fwd-node .fwd-band { stroke: none; }
+
+.fwd-node .fwd-title { font-weight: bold; font-size: 13px; }
+.fwd-node .fwd-sub   { opacity: .7; font-size: 11px; }
+
+.fwd-node.selected .fwd-box {
+	stroke: var(--fwd-accent);
+	stroke-width: 2.5;
+}
+
+.fwd-node.drop-target .fwd-box {
+	stroke: var(--fwd-accept);
+	stroke-width: 3;
+	stroke-dasharray: 5 3;
+}
+
+.fwd-node .fwd-handle {
+	fill: var(--fwd-accent);
+	stroke: #fff;
+	stroke-width: 1.5;
+	cursor: crosshair;
+	opacity: .55;
+}
+
+.fwd-node:hover .fwd-handle,
+.fwd-node.selected .fwd-handle { opacity: 1; }
+
+.fwd-node .fwd-icon {
+	fill: none;
+	stroke: #fff;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.fwd-type-router  .fwd-band { fill: #5d6b7a; }
+.fwd-type-zone    .fwd-band { fill: #7a5bb5; }
+.fwd-type-host    .fwd-band { fill: #3a7bd5; }
+.fwd-type-network .fwd-band { fill: #2b9aa0; }
+.fwd-type-group   .fwd-band { fill: #b5803a; }
+.fwd-type-ipset   .fwd-band { fill: #a0457a; }
+
+.fwd-edge { cursor: pointer; }
+
+.fwd-edge .fwd-line {
+	fill: none;
+	stroke-width: 2.2;
+}
+
+.fwd-edge .fwd-hit {
+	fill: none;
+	stroke: transparent;
+	stroke-width: 14;
+}
+
+.fwd-edge.ACCEPT .fwd-line { stroke: var(--fwd-accept); }
+.fwd-edge.REJECT .fwd-line { stroke: var(--fwd-reject); }
+.fwd-edge.DROP   .fwd-line { stroke: var(--fwd-drop); }
+.fwd-edge.MIXED .fwd-line { stroke: var(--fwd-accent); }
+/* lines implied by zone forwardings / zone input policies */
+.fwd-edge.policy .fwd-line {
+	stroke: var(--fwd-accept);
+	stroke-dasharray: 1 6;
+	stroke-linecap: round;
+	stroke-width: 3;
+	opacity: .75;
+}
+.fwd-edge.policy .fwd-badge { stroke-dasharray: 3 3; }
+.fwd-edge.policy .fwd-badge-text { font-style: italic; opacity: .85; }
+.fwd-edge.disabled .fwd-line { stroke: var(--fwd-muted); stroke-dasharray: 6 4; }
+.fwd-edge:hover .fwd-line, .fwd-edge.selected .fwd-line { stroke-width: 3.5; }
+.fwd-edge.dimmed { opacity: .25; }
+
+.fwd-edge .fwd-badge {
+	fill: var(--fwd-bg, #fff);
+	stroke-width: 1;
+	stroke: var(--fwd-node-border);
+}
+
+.fwd-edge .fwd-badge-text { font-size: 11px; }
+.fwd-edge.problem .fwd-badge { stroke: var(--fwd-drop); stroke-width: 2; }
+
+.fwd-marker-ACCEPT   { fill: var(--fwd-accept); }
+.fwd-marker-REJECT   { fill: var(--fwd-reject); }
+.fwd-marker-DROP     { fill: var(--fwd-drop); }
+.fwd-marker-MIXED    { fill: var(--fwd-accent); }
+.fwd-marker-policy   { fill: var(--fwd-accept); opacity: .7; }
+.fwd-marker-disabled { fill: var(--fwd-muted); }
+
+.fwd-temp-line {
+	stroke: var(--fwd-accent);
+	stroke-width: 2;
+	stroke-dasharray: 6 4;
+	fill: none;
+	pointer-events: none;
+}
+
+.fwd-grid-line { stroke: var(--fwd-grid); stroke-width: 1; }
+
+/* --- dialogs and tables ---------------------------------------------- */
+
+.fwd-form .fwd-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	margin: .45em 0;
+	gap: .3em 1em;
+}
+
+.fwd-form .fwd-row > label {
+	flex: 0 0 11em;
+	padding-top: .35em;
+	font-weight: bold;
+}
+
+.fwd-form .fwd-row > .fwd-field { flex: 1 1 18em; min-width: 0; }
+.fwd-form .fwd-row .cbi-value-description { margin-top: .2em; }
+.fwd-form .fwd-row.hidden { display: none; }
+
+.fwd-preview {
+	font-family: monospace;
+	font-size: 90%;
+	white-space: pre;
+	overflow: auto;
+	max-height: 18em;
+	padding: .6em;
+	border: 1px solid var(--fwd-node-border);
+	border-radius: 4px;
+	background: var(--fwd-node-bg);
+}
+
+.fwd-problem {
+	color: var(--fwd-drop);
+	margin: .25em 0;
+}
+
+.fwd-problem::before { content: '⚠ '; }
+
+.fwd-pill {
+	display: inline-block;
+	padding: 0 .5em;
+	border-radius: 1em;
+	font-size: 85%;
+	border: 1px solid var(--fwd-node-border);
+	margin: 1px 2px;
+	white-space: nowrap;
+}
+
+.fwd-pill.ACCEPT { border-color: var(--fwd-accept); color: var(--fwd-accept); }
+.fwd-pill.REJECT { border-color: var(--fwd-reject); color: var(--fwd-reject); }
+.fwd-pill.DROP   { border-color: var(--fwd-drop);   color: var(--fwd-drop); }
+
+.fwd-table td.fwd-actions { white-space: nowrap; text-align: right; }
+.fwd-table tr.disabled td { opacity: .55; }
+
+.fwd-dialog-buttons {
+	display: flex;
+	gap: .5em;
+	justify-content: flex-end;
+	margin-top: 1em;
+}
+
+.fwd-dialog-buttons .fwd-left { margin-right: auto; }
+
+@media (max-width: 600px) {
+	.fwd-form .fwd-row > label { flex-basis: 100%; padding-top: 0; }
+	.fwd-legend { display: none; }
+}
+
+/* --- wide layout and fullscreen ------------------------------------- */
+
+/* lift the theme's fixed content width while this view is shown */
+body.fwd-wide #maincontent,
+body.fwd-wide #maincontent.container,
+body.fwd-wide .main-right,
+body.fwd-wide #maincontainer {
+	max-width: none !important;
+	width: auto !important;
+}
+
+body.fwd-wide #maincontent {
+	margin-left: 0 !important;
+	margin-right: 0 !important;
+	align-self: stretch;
+	box-sizing: border-box;
+	padding-left: 16px;
+	padding-right: 16px;
+}
+
+.fwd-toolbar button.active {
+	box-shadow: inset 0 0 0 2px var(--fwd-accent);
+}
+
+/* maximized: the desktop covers the viewport (above the header, below LuCI modals),
+   optionally combined with browser fullscreen on the whole document so dialogs keep working */
+body.fwd-max { overflow: hidden; }
+
+body.fwd-max .fwd-desktop {
+	position: fixed;
+	inset: 0;
+	z-index: 850;
+	background: var(--fwd-bg, #fff);
+	padding: 12px 16px;
+	display: flex !important;
+	flex-direction: column;
+	box-sizing: border-box;
+	overflow: hidden;
+}
+
+body.fwd-max .fwd-desktop > div:last-child {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+body.fwd-max .fwd-canvas-wrap {
+	flex: 1;
+	height: auto;
+	min-height: 0;
+}
+
+/* --- hover card for connection lines --------------------------------- */
+
+.fwd-tooltip {
+	position: absolute;
+	z-index: 5;
+	min-width: 220px;
+	max-width: 460px;
+	padding: .5em .7em;
+	border: 1px solid var(--fwd-node-border);
+	border-radius: 6px;
+	background: var(--fwd-bg, #fff);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, .25);
+	font-size: 90%;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity .1s ease-in;
+}
+
+.fwd-tooltip.visible { opacity: 1; visibility: visible; }
+.fwd-tooltip table { border-collapse: collapse; width: 100%; }
+.fwd-tooltip td { padding: .15em .3em; vertical-align: top; border: 0; }
+.fwd-tooltip tr.disabled td { opacity: .55; }
+.fwd-tip-title { font-weight: bold; margin-bottom: .3em; }
+.fwd-tip-sub { opacity: .7; font-size: 90%; margin-top: .2em; }

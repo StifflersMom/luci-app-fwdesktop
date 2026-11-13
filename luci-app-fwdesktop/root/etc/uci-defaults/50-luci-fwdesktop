@@ -1,0 +1,11 @@
+#!/bin/sh
+[ -f /etc/config/fwdesktop ] || {
+	touch /etc/config/fwdesktop
+	uci -q batch <<-EOT
+		set fwdesktop.global=global
+		set fwdesktop.global.version='1'
+		commit fwdesktop
+	EOT
+}
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null
+exit 0

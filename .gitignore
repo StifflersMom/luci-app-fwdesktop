@@ -1,0 +1,11 @@
+# local test VM (image, sockets, keys)
+testvm/*.img
+testvm/*.sock
+testvm/*.log
+testvm/qemu.*
+testvm/ssh_key*
+# node / build output
+tests/node_modules/
+dist/
+# private build scripts
+buildsystem/
