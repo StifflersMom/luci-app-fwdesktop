@@ -51,3 +51,15 @@ assert.ok(!ops.some(o => o.name == 'keep_me'));
 assert.ok(!ops.some(o => o.name == 'fwd_c1_r0' && o.op == 'set'));
 assert.ok(ops.some(o => o.name == 'fwd_c1_r0' && o.op == 'unset' && o.option == 'extra'));
 console.log('ALL OK');
+
+// colour is kept in fwdesktop and never reaches firewall sections
+{
+  const mc = M.fromSections([{ '.type': 'object', '.name': 'h', type: 'host', zone: 'lan', address: ['1.2.3.4'], color: '#AA00ff', label: 'H' },
+                             { '.type': 'object', '.name': 'b', type: 'host', zone: 'lan', address: ['1.2.3.5'], color: 'red', label: 'B' }]);
+  assert.strictEqual(mc.objects.h.color, '#aa00ff');
+  assert.strictEqual(mc.objects.b.color, '');
+  const secs = M.toSections(mc);
+  assert.strictEqual(secs.find(x => x['.name'] == 'h').color, '#aa00ff');
+  assert.ok(!('color' in secs.find(x => x['.name'] == 'b')));
+  console.log('COLOR OK');
+}

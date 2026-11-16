@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-14';
+const ASSET_REV = '1.0.0-15';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -52,6 +52,12 @@ const ICONS = {
 	network: 'M-2.5,-8 h5 v4 h-5 z M-9,4 h5 v4 h-5 z M4,4 h5 v4 h-5 z M0,-4 v4 M-6.5,4 v-4 h13 v4',
 	group:   'M-8,-3 h10 v10 h-10 z M-3,-3 v-5 h10 v10 h-5',
 	ipset:   'M-8,-6 h2 M-3,-6 h11 M-8,0 h2 M-3,0 h11 M-8,6 h2 M-3,6 h11'
+};
+
+/* default symbol colours, keep in sync with .fwd-type-* in desktop.css */
+const TYPE_COLORS = {
+	router: '#5d6b7a', zone: '#7a5bb5', host: '#3a7bd5',
+	network: '#2b9aa0', group: '#b5803a', ipset: '#a0457a'
 };
 
 const ICMP_TYPES = [
@@ -577,7 +583,7 @@ return view.extend({
 			}, [
 				S('title', {}, [ TYPE_LABELS[o.type] + ': ' + o.label + (o.comment ? '\n' + o.comment : '') ]),
 				S('rect', { 'class': 'fwd-box', 'width': NODE_W, 'height': NODE_H, 'rx': 8 }),
-				S('path', { 'class': 'fwd-band', 'd': band }),
+				S('path', { 'class': 'fwd-band', 'd': band, 'style': o.color ? 'fill:' + o.color : null }),
 				S('path', { 'class': 'fwd-icon', 'd': ICONS[o.type], 'transform': 'translate(17,%d)'.format(NODE_H / 2) }),
 				S('text', { 'class': 'fwd-title', 'x': 44, 'y': 24 }, [ trunc(o.label, 17) ]),
 				S('text', { 'class': 'fwd-sub', 'x': 44, 'y': 42 }, [ this.objectSubtitle(o) ]),
@@ -1142,6 +1148,36 @@ return view.extend({
 				? _('An fw4 IP set (Network → Firewall → IP Sets). Its entries can change without touching the rules, e.g. block lists or sets filled by dnsmasq.')
 				: _('No IP sets are defined yet. Create one with "+ New IP set".')));
 
+		/* symbol colour: native RGB picker plus hex field, '' means type default */
+		let color = o.color || '';
+		const def = TYPE_COLORS[o.type];
+		const picker = E('input', { 'type': 'color', 'value': color || def, 'style': 'width:3em;height:2em;padding:0;border:0;background:none;cursor:pointer' });
+		const hex = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'value': color, 'placeholder': def, 'maxlength': 7, 'style': 'width:7em' });
+		const sample = S('svg', { 'width': 22, 'height': 22, 'viewBox': '-11 -11 22 22' }, [
+			S('rect', { 'x': -11, 'y': -11, 'width': 22, 'height': 22, 'rx': 5, 'style': 'fill:' + (color || def) }),
+			S('path', { 'd': ICONS[o.type], 'transform': 'scale(.85)', 'style': 'fill:none;stroke:#fff;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round' })
+		]);
+		const setColor = (c) => {
+			color = c;
+			picker.value = c || def;
+			if (document.activeElement !== hex) hex.value = c;
+			sample.firstChild.style.fill = c || def;
+		};
+		picker.addEventListener('input', () => setColor(picker.value.toLowerCase()));
+		hex.addEventListener('input', () => {
+			const v = hex.value.trim();
+			if (/^#[0-9a-fA-F]{6}$/.test(v)) setColor(v.toLowerCase());
+			else if (v === '') setColor('');
+		});
+		const swatches = Object.values(TYPE_COLORS).concat([ '#2e9d5b', '#c93c3c', '#d9822b', '#455a64' ])
+			.filter((c, i, l) => l.indexOf(c) == i)
+			.map(c => E('span', { 'class': 'fwd-swatch', 'title': c, 'style': 'background:' + c, 'click': () => setColor(c == def ? '' : c) }));
+		rows.push(this.formRow(_('Colour'), E('div', { 'class': 'fwd-color-row' }, [
+			sample, picker, hex,
+			E('button', { 'class': 'cbi-button', 'click': () => setColor('') }, [ _('Default') ]),
+			E('span', { 'class': 'fwd-swatches' }, swatches)
+		]), _('Colour of the symbol on the desktop. Stored in /etc/config/fwdesktop, not in the firewall configuration.')));
+
 		rows.push(this.formRow(_('Comment'), wComment));
 
 		const form = E('div', { 'class': 'fwd-form' }, rows);
@@ -1168,6 +1204,7 @@ return view.extend({
 
 			o.label = label;
 			o.comment = wComment.getValue().trim();
+			o.color = (color && color != def) ? color : '';
 			if (o.type == 'ipset') {
 				o.ipset = wSet.getValue();
 				if (!o.ipset)

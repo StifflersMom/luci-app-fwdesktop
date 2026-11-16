@@ -25,6 +25,8 @@ and `nat` sections.
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it
   to manage them in one dialog, merge connections that only differ in services.
+- **Colours:** give any object its own symbol colour (RGB picker); stored in
+  `/etc/config/fwdesktop`, never in the firewall configuration.
 - **IP set management:** create, edit, rename and delete fw4 IP sets (entries,
   load file, timeout, counters) on the *IP sets* tab; renames follow through to
   desktop objects and rules.

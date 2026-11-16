@@ -17,6 +17,8 @@
  *       list   address '192.168.1.10'     (host / network)
  *       list   member  '<object id>'      (group)
  *       option x / option y               (desktop position)
+ *       option color   '#3a7bd5'          (optional symbol colour; UI-only options live here,
+ *                                          never in /etc/config/firewall)
  *
  *   config service '<id>'
  *       option label   'Plex'
@@ -140,6 +142,7 @@ function fromSections(sections) {
 				address: toList(s.address),
 				member: toList(s.member),
 				ipset: s.ipset || '',
+				color: /^#[0-9a-fA-F]{6}$/.test(s.color || '') ? s.color.toLowerCase() : '',
 				x: +s.x || 0,
 				y: +s.y || 0,
 				comment: s.comment || ''
@@ -208,6 +211,7 @@ function toSections(model) {
 			address: (o.type == 'host' || o.type == 'network') ? o.address : null,
 			member: o.type == 'group' ? o.member : null,
 			ipset: o.type == 'ipset' ? o.ipset : null,
+			color: o.color || null,
 			x: Math.round(o.x),
 			y: Math.round(o.y),
 			comment: o.comment
