@@ -32,6 +32,7 @@ jobs:
           node tests/model.test.js
           node tests/import.test.js
           node tests/ipset.test.js
+          node tests/schema.test.js
 
       - name: Build apk with the OpenWrt SDK
         id: build

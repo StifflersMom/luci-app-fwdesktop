@@ -17,6 +17,7 @@ jobs:
           node tests/model.test.js
           node tests/import.test.js
           node tests/ipset.test.js
+          node tests/schema.test.js
       - name: JavaScript syntax
         run: |
           for f in $(find luci-app-fwdesktop/htdocs -name '*.js'); do node --check "$f"; done

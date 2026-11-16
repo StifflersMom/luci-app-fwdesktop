@@ -557,15 +557,21 @@ function generate(model) {
 							problems.push({ conn: cid, msg: 'Number of public ports must match the number of service ports' });
 							break;
 						}
-						ports.forEach((p, i) => {
+						/* fw4 redirects take a single src_ip, so emit one redirect per source address */
+						const srcIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
+						if (!srcIps.length) {
+							problems.push({ conn: cid, msg: 'Port forwarding is IPv4 only, but the source has only IPv6 addresses' });
+							break;
+						}
+						ports.forEach((p, i) => srcIps.forEach(ip => {
 							sections.push(withExtra(compact({
 								'.type': 'redirect',
 								'.name': base + 'd' + (n++),
-								name: title + ' (' + (extPorts[i] || p) + ')',
+								name: title + ' (' + (extPorts[i] || p) + ')' + (srcIps.length > 1 ? ' ' + ip : ''),
 								target: 'DNAT',
 								family: 'ipv4',
 								src: s.zone,
-								src_ip: s.addrs,
+								src_ip: ip,
 								ipset: setMatch,
 								src_dport: extPorts[i] || p,
 								dest: d.zone,
@@ -574,7 +580,7 @@ function generate(model) {
 								proto: b.proto,
 								log: c.log ? '1' : null
 							})));
-						});
+						}));
 						continue;
 					}
 
@@ -602,17 +608,22 @@ function generate(model) {
 				}
 
 				if (c.nat == 'masq' && c.action == 'ACCEPT' && c.family != 'ipv6') {
-					sections.push(compact({
-						'.type': 'nat',
-						'.name': base + 'n' + (n++),
-						name: title + ' (NAT)',
-						family: 'ipv4',
-						src: d.zone,
-						src_ip: s.addrs ? s.addrs.filter(a => !isIPv6(a)) : null,
-						dest_ip: d.addrs ? d.addrs.filter(a => !isIPv6(a)) : null,
-						proto: 'all',
-						target: 'MASQUERADE'
-					}));
+					/* fw4 nat sections take a single src_ip / dest_ip each */
+					const sIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
+					const dIps = d.addrs ? d.addrs.filter(a => !isIPv6(a)) : [ null ];
+					for (const sip of sIps)
+						for (const dip of dIps)
+							sections.push(compact({
+								'.type': 'nat',
+								'.name': base + 'n' + (n++),
+								name: title + ' (NAT)',
+								family: 'ipv4',
+								src: d.zone,
+								src_ip: sip,
+								dest_ip: dip,
+								proto: 'all',
+								target: 'MASQUERADE'
+							}));
 				}
 			}
 		}
