@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-11';
+const ASSET_REV = '1.0.0-12';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -1994,14 +1994,36 @@ return view.extend({
 		const gen = fwm.generate(this.model);
 		this.applyOps('firewall', fwm.diffSections(uci.sections('firewall'), gen.sections, fwm.isOwnedFirewallSection));
 
-		/* keep generated sections in connection order, after hand written ones */
-		const want = gen.sections.map(s => s['.name']);
-		const have = uci.sections('firewall').filter(fwm.isOwnedFirewallSection).map(s => s['.name']);
-		if (want.join(' ') != have.join(' '))
-			for (const name of want)
-				uci.move('firewall', name, null);
-
+		/*
+		 * Save in two steps. uci.js maps the names of newly created sections
+		 * by position in its task list, which goes wrong when the same save
+		 * also removes options; a reorder in that save then sends bogus
+		 * section names and uci/order fails. So: first write all content,
+		 * then (on the reloaded state) fix the section order separately.
+		 */
 		return uci.save().then(() => {
+			let moved = false;
+
+			/* generated firewall sections in connection order, after hand written ones */
+			const want = gen.sections.map(s => s['.name']);
+			const have = uci.sections('firewall').filter(fwm.isOwnedFirewallSection).map(s => s['.name']);
+			if (want.join(' ') != have.join(' ')) {
+				for (const name of want)
+					uci.move('firewall', name, null);
+				moved = true;
+			}
+
+			/* connection order is the order of the connection sections in fwdesktop */
+			const order = fwm.connectionOrder(this.model);
+			const cur = uci.sections('fwdesktop', 'connection').map(s => s['.name']);
+			if (order.join(' ') != cur.join(' ')) {
+				for (const name of order)
+					uci.move('fwdesktop', name, null);
+				moved = true;
+			}
+
+			return moved ? uci.save() : null;
+		}).then(() => {
 			this.dirty = false;
 			this.refresh();
 			return ui.changes.init();
