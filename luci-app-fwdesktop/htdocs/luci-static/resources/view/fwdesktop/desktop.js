@@ -4,10 +4,11 @@
 'require ui';
 'require uci';
 'require rpc';
+'require validation';
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-10';
+const ASSET_REV = '1.0.0-11';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -124,6 +125,7 @@ return view.extend({
 		this.connPane = E('div');
 		this.objPane = E('div');
 		this.svcPane = E('div');
+		this.setPane = E('div');
 		this.previewPane = E('div');
 
 		const tabs = E('div', {}, [
@@ -134,6 +136,7 @@ return view.extend({
 			E('div', { 'data-tab': 'connections', 'data-tab-title': _('Connections') }, [ this.connPane ]),
 			E('div', { 'data-tab': 'objects', 'data-tab-title': _('Objects') }, [ this.objPane ]),
 			E('div', { 'data-tab': 'services', 'data-tab-title': _('Services') }, [ this.svcPane ]),
+			E('div', { 'data-tab': 'ipsets', 'data-tab-title': _('IP sets') }, [ this.setPane ]),
 			E('div', { 'data-tab': 'preview', 'data-tab-title': _('Generated rules') }, [ this.previewPane ])
 		]);
 
@@ -220,6 +223,7 @@ return view.extend({
 		this.renderConnections();
 		this.renderObjects();
 		this.renderServices();
+		this.renderSets();
 		this.renderPreview();
 
 		const n = this.gen.problems.length;
@@ -1068,9 +1072,9 @@ return view.extend({
 
 	/* --- object editor ------------------------------------------------ */
 
-	editObject(id, type) {
+	editObject(id, type, draft) {
 		const isNew = !id;
-		const o = isNew ? {
+		const o = draft ? clone(draft) : isNew ? {
 			id: fwm.randomId('o', this.model.objects), type: type, label: '', zone: null,
 			address: [], member: [], comment: '', x: 0, y: 0
 		} : clone(this.model.objects[id]);
@@ -1100,6 +1104,13 @@ return view.extend({
 		if (o.ipset && !setChoices[o.ipset])
 			setChoices[o.ipset] = o.ipset + ' (' + _('not defined') + ')';
 		const wSet = new ui.Select(o.ipset || null, setChoices, { optional: false, sort: true });
+		const newSetBtn = E('button', { 'class': 'cbi-button cbi-button-add', 'style': 'margin-left:.5em', 'click': ui.createHandlerFn(this, () => {
+			const draft = Object.assign({}, o, { label: wLabel.getValue(), zone: wZone.getValue(), comment: wComment.getValue() });
+			ui.hideModal();
+			this.editSet(null, name => {
+				this.editObject(isNew ? null : o.id, o.type, Object.assign(draft, { ipset: name || draft.ipset }));
+			});
+		}) }, [ _('+ New IP set') ]);
 
 		const rows = [ this.formRow(_('Name'), wLabel) ];
 
@@ -1115,9 +1126,9 @@ return view.extend({
 		else if (o.type == 'group')
 			rows.push(this.formRow(_('Members'), wMembers, _('Hosts, networks and zones in this group. Members may be in different zones.')));
 		else if (o.type == 'ipset')
-			rows.push(this.formRow(_('IP set'), wSet, Object.keys(setChoices).length
+			rows.push(this.formRow(_('IP set'), E('div', { 'style': 'display:flex;align-items:center;flex-wrap:wrap' }, [ wSet.render(), newSetBtn ]), Object.keys(setChoices).length
 				? _('An fw4 IP set (Network → Firewall → IP Sets). Its entries can change without touching the rules, e.g. block lists or sets filled by dnsmasq.')
-				: _('No IP sets are defined yet. Create one under Network → Firewall → IP Sets first.')));
+				: _('No IP sets are defined yet. Create one with "+ New IP set".')));
 
 		rows.push(this.formRow(_('Comment'), wComment));
 
@@ -1177,7 +1188,7 @@ return view.extend({
 			this.markDirty();
 		};
 
-		ui.showModal((isNew ? _('New %s') : _('Edit %s')).format(TYPE_LABELS[o.type].toLowerCase()), [
+		ui.showModal((isNew ? _('New %s') : _('Edit %s')).format(o.type == 'ipset' ? _('IP set object') : TYPE_LABELS[o.type].toLowerCase()), [
 			form,
 			this.dialogButtons((isNew || o.type == 'router') ? null : () => { ui.hideModal(); this.deleteObject(o.id); }, save)
 		]);
@@ -1686,6 +1697,208 @@ return view.extend({
 				this.smallBtn(_('+ Zone'), 'cbi-button-add', () => this.editObject(null, 'zone')),
 				this.smallBtn(_('+ IP set'), 'cbi-button-add', () => this.editObject(null, 'ipset'))
 			])
+		]);
+	},
+
+	/* --- fw4 IP set management ---------------------------------------- */
+
+	setSection(name) {
+		return uci.sections('firewall', 'ipset').filter(st => st.name == name)[0];
+	},
+
+	/* manual (non generated) rules / redirects that reference a set */
+	setRuleUsers(name) {
+		return uci.sections('firewall').filter(sec =>
+			(sec['.type'] == 'rule' || sec['.type'] == 'redirect') && !fwm.isOwnedFirewallSection(sec) &&
+			sec.ipset && fwm.toList(sec.ipset).join(' ').replace(/^!/, '').split(/[\s,]+/)[0] == name);
+	},
+
+	setObjectUsers(name) {
+		return Object.values(this.model.objects).filter(o => o.type == 'ipset' && o.ipset == name);
+	},
+
+	entryDatatype(family, match) {
+		const m = fwm.toList(match);
+		if (m.length != 1)
+			return null;
+		const t = m[0].replace(/^(src|dest|dst)_/, '');
+		const v6 = (family == 'ipv6' || family == '6');
+		switch (t) {
+		case 'ip':   return v6 ? 'ip6addr(1)' : 'ip4addr(1)';
+		case 'net':  return v6 ? 'or(cidr6,ip6addr(1))' : 'or(cidr4,ip4addr(1),iprange4)';
+		case 'mac':  return 'macaddr';
+		case 'port': return 'portrange';
+		}
+		return null;
+	},
+
+	editSet(sid, onDone) {
+		const isNew = !sid;
+		const cur = isNew ? {} : (uci.get('firewall', sid) || {});
+		const oldName = cur.name || '';
+
+		const MATCHES = {
+			'net': _('Network or address (net)'), 'ip': _('Address (ip)'),
+			'src_net': 'src_net', 'dest_net': 'dest_net', 'src_ip': 'src_ip', 'dest_ip': 'dest_ip',
+			'mac': _('MAC address (mac)'), 'src_mac': 'src_mac', 'dest_port': _('Destination port (dest_port)'), 'port': 'port'
+		};
+
+		const wName = new ui.Textfield(oldName, { optional: false, datatype: 'and(uciname,maxlength(31))', placeholder: 'blocklist' });
+		const wFamily = new ui.Select(cur.family == 'ipv6' || cur.family == '6' ? 'ipv6' : 'ipv4', { ipv4: 'IPv4', ipv6: 'IPv6' }, { optional: false, sort: false });
+		const wMatch = new ui.Dropdown(fwm.toList(cur.match).length ? fwm.toList(cur.match) : [ 'net' ], MATCHES, { multiple: true, optional: false, sort: false, display_items: 3 });
+		const wEntries = new ui.Textarea(fwm.toList(cur.entry).join('\n'), { rows: 8, placeholder: '192.0.2.0/24\n198.51.100.7' });
+		const wFile = new ui.Textfield(cur.loadfile || '', { optional: true, datatype: 'file', placeholder: '/etc/blocklist.txt' });
+		const wTimeout = new ui.Textfield(cur.timeout && cur.timeout != '-1' ? cur.timeout : '', { optional: true, datatype: 'uinteger', placeholder: _('never') });
+		const wCounters = new ui.Checkbox(cur.counters == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
+		const wComment = new ui.Textfield(cur.comment || '', { optional: true });
+		const errors = E('div');
+
+		const form = E('div', { 'class': 'fwd-form' }, [
+			this.formRow(_('Name'), wName, _('Letters, digits and underscore. Rules refer to the set by this name.')),
+			this.formRow(_('Family'), wFamily),
+			this.formRow(_('Match'), wMatch, _('What the entries are. "net" accepts networks and single addresses; the direction (source/destination) is chosen where the set is used.')),
+			this.formRow(_('Entries'), wEntries, _('One entry per line. Lines starting with # are ignored.')),
+			this.formRow(_('Load from file'), wFile, _('Optional: a file on the router with one entry per line, loaded when the firewall starts (e.g. a downloaded block list).')),
+			this.formRow(_('Entry timeout'), wTimeout, _('Seconds after which dynamically added entries expire. Empty: never.')),
+			this.formRow(_('Counters'), wCounters, _('Count packets and bytes per entry.')),
+			this.formRow(_('Comment'), wComment),
+			errors
+		]);
+
+		const save = () => {
+			wName.triggerValidation(); wFile.triggerValidation(); wTimeout.triggerValidation();
+			const name = wName.getValue().trim();
+			const family = wFamily.getValue();
+			const match = fwm.toList(wMatch.getValue());
+			const lines = wEntries.getValue().split(/\n/).map(l => l.trim()).filter(l => l && l.charAt(0) != '#');
+			const msgs = [];
+
+			if (!name || !wName.isValid()) msgs.push(_('Please enter a valid name (letters, digits, underscore).'));
+			else if (name != oldName && this.setSection(name)) msgs.push(_('An IP set named "%s" already exists.').format(name));
+			if (!match.length) msgs.push(_('Please choose what the set matches.'));
+			if (!wFile.isValid() || !wTimeout.isValid()) msgs.push(_('Please correct the highlighted fields.'));
+
+			const dt = this.entryDatatype(family, match);
+			if (dt) {
+				const v = validation.create(E('input'), dt);
+				const bad = lines.filter(l => {
+					v.value = l;
+					v.error = null;
+					return v.vstack[0].apply(v, v.vstack[1]) !== true;
+				});
+				if (bad.length)
+					msgs.push(_('Invalid entries for this match type: %s').format(bad.slice(0, 5).join(', ') + (bad.length > 5 ? ' …' : '')));
+			}
+
+			if (msgs.length) {
+				dom.content(errors, msgs.map(m => E('div', { 'class': 'fwd-problem' }, [ m ])));
+				return;
+			}
+
+			const id = isNew ? uci.add('firewall', 'ipset') : sid;
+			uci.set('firewall', id, 'name', name);
+			uci.set('firewall', id, 'family', family);
+			uci.set('firewall', id, 'match', match);
+			uci.set('firewall', id, 'entry', lines.length ? lines : null);
+			uci.set('firewall', id, 'loadfile', wFile.getValue().trim() || null);
+			uci.set('firewall', id, 'timeout', wTimeout.getValue().trim() || null);
+			uci.set('firewall', id, 'counters', wCounters.getValue() == '1' ? '1' : null);
+			uci.set('firewall', id, 'comment', wComment.getValue().trim() || null);
+
+			/* keep references consistent when a set is renamed */
+			if (!isNew && oldName && name != oldName) {
+				for (const o of this.setObjectUsers(oldName)) {
+					o.ipset = name;
+					if (o.label == oldName) o.label = name;
+				}
+				for (const sec of this.setRuleUsers(oldName)) {
+					const v = fwm.toList(sec.ipset).join(' ');
+					uci.set('firewall', sec['.name'], 'ipset', v.replace(/^(!?)[^\s,]+/, '$1' + name));
+				}
+			}
+
+			ui.hideModal();
+			this.markDirty();
+			if (onDone) onDone(name);
+		};
+
+		ui.showModal(isNew ? _('New IP set') : _('Edit IP set %s').format(oldName), [
+			form,
+			this.dialogButtons(isNew ? null : () => { ui.hideModal(); this.deleteSet(sid); }, save,
+				onDone ? () => { ui.hideModal(); onDone(null); } : null)
+		], 'cbi-modal');
+	},
+
+	deleteSet(sid) {
+		const st = uci.get('firewall', sid);
+		if (!st) return;
+		const objs = this.setObjectUsers(st.name);
+		const rules = this.setRuleUsers(st.name);
+
+		if (rules.length)
+			return ui.showModal(_('IP set in use'), [
+				E('p', [ _('The set "%s" is used by these firewall rules that were not created on the desktop:').format(st.name) ]),
+				E('ul', rules.map(r => E('li', [ r.name || r['.name'] ]))),
+				E('p', [ _('Change or delete those rules first (Network → Firewall), or import them into the desktop.') ]),
+				E('div', { 'class': 'fwd-dialog-buttons' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Close') ]) ])
+			]);
+
+		const conns = Object.values(this.model.connections).filter(c => objs.some(o => c.src == o.id || c.dest == o.id));
+
+		const doDelete = () => {
+			for (const c of conns)
+				delete this.model.connections[c.id];
+			for (const o of objs) {
+				for (const g of Object.values(this.model.objects))
+					if (g.type == 'group') g.member = g.member.filter(m => m != o.id);
+				delete this.model.objects[o.id];
+			}
+			uci.remove('firewall', sid);
+			ui.hideModal();
+			this.sel = null;
+			this.hideInfoCard();
+			this.markDirty();
+		};
+
+		ui.showModal(_('Delete IP set'), [
+			E('p', [ _('Delete the IP set "%s"?').format(st.name) ]),
+			objs.length ? E('p', [ _('This also deletes %d desktop object(s) and %d connection(s) that use it.').format(objs.length, conns.length) ]) : '',
+			E('div', { 'class': 'fwd-dialog-buttons' }, [
+				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': doDelete }, [ _('Delete') ])
+			])
+		]);
+	},
+
+	renderSets() {
+		const sets = uci.sections('firewall', 'ipset');
+		const rows = sets.map(st => {
+			const entries = fwm.toList(st.entry);
+			const objs = this.setObjectUsers(st.name), rules = this.setRuleUsers(st.name);
+			return E('tr', { 'class': 'tr' + (st.enabled == '0' ? ' disabled' : '') }, [
+				E('td', { 'class': 'td' }, [ E('strong', [ st.name || '?' ]), st.comment ? E('div', { 'class': 'fwd-tip-sub' }, [ st.comment ]) : '' ]),
+				E('td', { 'class': 'td' }, [ (st.family == 'ipv6' || st.family == '6') ? 'IPv6' : 'IPv4' ]),
+				E('td', { 'class': 'td' }, [ fwm.toList(st.match).join(', ') || '-' ]),
+				E('td', { 'class': 'td' }, [
+					entries.length ? _('%d entries').format(entries.length) : '',
+					entries.length ? E('div', { 'class': 'fwd-tip-sub fwd-mono' }, [ trunc(entries.slice(0, 3).join(', '), 48) ]) : '',
+					st.loadfile ? E('div', [ _('from file %s').format(st.loadfile) ]) : '',
+					(!entries.length && !st.loadfile) ? E('em', [ _('empty (filled at runtime)') ]) : ''
+				]),
+				E('td', { 'class': 'td' }, [
+					[ objs.length ? _('%d desktop object(s)').format(objs.length) : '', rules.length ? _('%d other rule(s)').format(rules.length) : '' ].filter(Boolean).join(', ') || '-'
+				]),
+				E('td', { 'class': 'td fwd-actions' }, [
+					this.smallBtn(_('Edit'), 'cbi-button-edit', () => this.editSet(st['.name'])),
+					this.smallBtn(_('Delete'), 'cbi-button-remove', () => this.deleteSet(st['.name']))
+				])
+			]);
+		});
+
+		dom.content(this.setPane, [
+			E('p', { 'class': 'cbi-section-descr' }, [ _('IP sets are named lists of addresses, networks, MACs or ports kept by the firewall (fw4). Use them on the desktop with "+ IP set". Changes are written to /etc/config/firewall when you press Save & Apply.') ]),
+			this.table([ _('Name'), _('Family'), _('Match'), _('Entries'), _('Used by'), '' ], rows, _('No IP sets yet.')),
+			E('div', { 'class': 'fwd-toolbar' }, [ this.smallBtn(_('+ New IP set'), 'cbi-button-add', () => this.editSet(null)) ])
 		]);
 	},
 

@@ -25,6 +25,9 @@ and `nat` sections.
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it
   to manage them in one dialog, merge connections that only differ in services.
+- **IP set management:** create, edit, rename and delete fw4 IP sets (entries,
+  load file, timeout, counters) on the *IP sets* tab; renames follow through to
+  desktop objects and rules.
 - **Interface info:** click a zone (or the router) to see its interfaces with
   device, state and live IPv4/IPv6 addresses.
 - **Zone policies visible:** zone forwardings (e.g. LAN → WAN) and zones with
