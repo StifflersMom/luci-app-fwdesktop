@@ -12,7 +12,7 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
   const row = l => p.locator('.modal .fwd-row', { has: p.locator('label', { hasText: l }) });
   const node = label => p.locator('.fwd-node', { has: p.locator('.fwd-title', { hasText: label }) });
   // new IP set object
-  await p.click('button:has-text("+ IP set")'); await p.waitForSelector('.modal .fwd-form');
+  await p.click('button.fwd-add.fwd-type-ipset'); await p.waitForSelector('.modal .fwd-form');
   await row('Zone').locator('select').selectOption('wan');
   await row('IP set').locator('select').selectOption('blocklist');
   await p.screenshot({ path: out + '/ipset-dialog.png' });

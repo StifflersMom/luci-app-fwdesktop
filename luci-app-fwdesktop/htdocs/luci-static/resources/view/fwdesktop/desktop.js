@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-13';
+const ASSET_REV = '1.0.0-14';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -237,6 +237,22 @@ return view.extend({
 		]);
 	},
 
+	/* buttons that look like the object symbols on the desktop */
+	addObjectButtons() {
+		return [ 'host', 'network', 'group', 'zone', 'ipset' ].map(type => E('button', {
+			'class': 'cbi-button fwd-add fwd-type-' + type,
+			'title': _('Add %s').format(TYPE_LABELS[type]),
+			'click': ui.createHandlerFn(this, () => this.editObject(null, type))
+		}, [
+			S('svg', { 'class': 'fwd-add-icon', 'width': 22, 'height': 22, 'viewBox': '-11 -11 22 22', 'aria-hidden': 'true' }, [
+				S('rect', { 'class': 'fwd-band', 'x': -11, 'y': -11, 'width': 22, 'height': 22, 'rx': 5 }),
+				S('path', { 'class': 'fwd-icon', 'd': ICONS[type], 'transform': 'scale(.85)' })
+			]),
+			E('span', { 'class': 'fwd-add-plus' }, [ '+' ]),
+			E('span', [ TYPE_LABELS[type] ])
+		]));
+	},
+
 	/* --- toolbar ------------------------------------------------------ */
 
 	renderToolbar() {
@@ -246,11 +262,7 @@ return view.extend({
 		}, [ title ]);
 
 		return E('div', { 'class': 'fwd-toolbar' }, [
-			btn(_('+ Host'), 'cbi-button-add', () => this.editObject(null, 'host')),
-			btn(_('+ Network'), 'cbi-button-add', () => this.editObject(null, 'network')),
-			btn(_('+ Group'), 'cbi-button-add', () => this.editObject(null, 'group')),
-			btn(_('+ Zone'), 'cbi-button-add', () => this.editObject(null, 'zone')),
-			btn(_('+ IP set'), 'cbi-button-add', () => this.editObject(null, 'ipset')),
+			...this.addObjectButtons(),
 			E('span', { 'class': 'fwd-sep' }),
 			btn(_('+ Service'), '', () => this.editService(null)),
 			btn(_('Import rules…'), '', () => this.importDialog()),
@@ -1691,11 +1703,7 @@ return view.extend({
 		dom.content(this.objPane, [
 			this.table([ _('Type'), _('Name'), _('Zone'), _('Addresses / members'), _('Connections'), '' ], rows, _('No objects')),
 			E('div', { 'class': 'fwd-toolbar' }, [
-				this.smallBtn(_('+ Host'), 'cbi-button-add', () => this.editObject(null, 'host')),
-				this.smallBtn(_('+ Network'), 'cbi-button-add', () => this.editObject(null, 'network')),
-				this.smallBtn(_('+ Group'), 'cbi-button-add', () => this.editObject(null, 'group')),
-				this.smallBtn(_('+ Zone'), 'cbi-button-add', () => this.editObject(null, 'zone')),
-				this.smallBtn(_('+ IP set'), 'cbi-button-add', () => this.editObject(null, 'ipset'))
+				...this.addObjectButtons()
 			])
 		]);
 	},

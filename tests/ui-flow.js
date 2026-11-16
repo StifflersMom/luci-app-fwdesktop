@@ -37,7 +37,7 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
   };
 
   // 1. new host "NAS"
-  await p.click('button:has-text("+ Host")');
+  await p.click('button.fwd-add.fwd-type-host');
   await p.waitForSelector('.modal .fwd-form');
   await p.locator('.modal .fwd-row', { has: p.locator('label', { hasText: 'Name' }) }).locator('input').fill('NAS');
   await p.click('.modal .cbi-dynlist .cbi-dropdown');
