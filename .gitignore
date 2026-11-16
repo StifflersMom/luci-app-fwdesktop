@@ -10,3 +10,5 @@ dist/
 # private build scripts
 buildsystem/
 .sdk/
+# local install helper
+installonwtalcore.sh
