@@ -25,6 +25,10 @@ and `nat` sections.
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it
   to manage them in one dialog, merge connections that only differ in services.
+- **Policy routing:** IPv4/IPv6 routing rules (source, destination, interfaces,
+  mark, ports, priority → table, goto or prohibit/unreachable/blackhole) and
+  static routes per routing table on the *Routing* tab, with a live view of
+  `ip rule` / `ip route`; stored in `/etc/config/network`.
 - **Reset affected connections on apply** (optional, *Settings* tab): after
   Save & Apply the conntrack entries of added, changed or removed rules are
   deleted, so established connections are checked against the new rules

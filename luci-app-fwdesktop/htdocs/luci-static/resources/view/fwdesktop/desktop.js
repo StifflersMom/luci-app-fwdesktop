@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-21';
+const ASSET_REV = '1.0.0-22';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -124,7 +124,8 @@ return view.extend({
 		return Promise.all([
 			uci.load([ 'fwdesktop', 'firewall', 'network' ]),
 			L.resolveDefault(callHostHints(), {}),
-			L.resolveDefault(callNetworkDump(), [])
+			L.resolveDefault(callNetworkDump(), []),
+			L.resolveDefault(fs.read('/etc/iproute2/rt_tables'), '')
 		]);
 	},
 
@@ -133,6 +134,7 @@ return view.extend({
 	render(data) {
 		this.hints = data[1] || {};
 		this.ifaces = data[2] || [];
+		this.rtTables = this.parseRtTables(data[3] || '');
 		this.zones = uci.sections('firewall', 'zone').map(z => z.name).filter(Boolean);
 		this.model = fwm.fromSections(uci.sections('fwdesktop'));
 		this.pan = { x: 40, y: 30, k: 1 };
@@ -158,6 +160,7 @@ return view.extend({
 		this.setPane = E('div');
 		this.backupPane = E('div');
 		this.settingsPane = E('div');
+		this.routePane = E('div');
 		this.zonePane = E('div');
 		this.previewPane = E('div');
 
@@ -172,6 +175,7 @@ return view.extend({
 			E('div', { 'data-tab': 'zones', 'data-tab-title': _('Zones') }, [ this.zonePane ]),
 			E('div', { 'data-tab': 'ipsets', 'data-tab-title': _('IP sets') }, [ this.setPane ]),
 			E('div', { 'data-tab': 'backup', 'data-tab-title': _('Backup') }, [ this.backupPane ]),
+			E('div', { 'data-tab': 'routing', 'data-tab-title': _('Routing') }, [ this.routePane ]),
 			E('div', { 'data-tab': 'settings', 'data-tab-title': _('Settings') }, [ this.settingsPane ]),
 			E('div', { 'data-tab': 'preview', 'data-tab-title': _('Generated rules') }, [ this.previewPane ])
 		]);
@@ -301,6 +305,7 @@ return view.extend({
 		this.renderZones();
 		this.renderBackup();
 		this.renderSettings();
+		this.renderRouting();
 		this.renderPreview();
 
 		this.renderStatus();
@@ -2240,6 +2245,307 @@ return view.extend({
 		]);
 	},
 
+	/* --- policy routing: network rule/rule6 and route/route6 sections ---- */
+
+	parseRtTables(text) {
+		const t = {};
+		for (const line of String(text).split('\n')) {
+			const m = line.trim().match(/^(\d+)\s+(\S+)/);
+			if (m && !/^(0|253|254|255)$/.test(m[1]))
+				t[m[2]] = m[1];
+		}
+		return t;
+	},
+
+	tableChoices(withMain) {
+		const c = {};
+		if (withMain) c[''] = _('main (default)');
+		c.main = 'main (254)';
+		c.local = 'local (255)';
+		for (const name in this.rtTables)
+			c[name] = '%s (%s)'.format(name, this.rtTables[name]);
+		const used = uci.sections('network').map(s => s.lookup || s.table).filter(Boolean);
+		for (const t of used)
+			if (!c[t]) c[t] = t;
+		return c;
+	},
+
+	ifaceChoices(optional) {
+		const c = {};
+		if (optional) c[''] = _('any');
+		for (const ifc of uci.sections('network', 'interface'))
+			if (ifc['.name'] != 'loopback')
+				c[ifc['.name']] = ifc['.name'];
+		return c;
+	},
+
+	ruleSummary(r) {
+		const parts = [];
+		if (r.in) parts.push(_('in %s').format(r.in));
+		if (r.out) parts.push(_('out %s').format(r.out));
+		if (r.src) parts.push(_('from %s').format(r.src));
+		if (r.dest) parts.push(_('to %s').format(r.dest));
+		if (r.ipproto) parts.push(r.ipproto + (r.dport ? ' ' + _('port %s').format(r.dport) : '') + (r.sport ? ' ' + _('sport %s').format(r.sport) : ''));
+		if (r.mark) parts.push(_('mark %s').format(r.mark));
+		if (r.tos) parts.push(_('tos %s').format(r.tos));
+		if (r.uidrange) parts.push(_('uid %s').format(r.uidrange));
+		return (r.invert == '1' ? _('not') + ' ' : '') + (parts.join(', ') || _('all traffic'));
+	},
+
+	ruleAction(r) {
+		if (r.action) return r.action;
+		if (r.goto) return _('goto %s').format(r.goto);
+		if (r.lookup) return _('lookup %s').format(r.lookup);
+		return '-';
+	},
+
+	editRule(sid, family) {
+		const isNew = !sid;
+		const cur = isNew ? {} : (uci.get('network', sid) || {});
+		let fam = isNew ? (family || 'ipv4') : (cur['.type'] == 'rule6' ? 'ipv6' : 'ipv4');
+		const ACTIONS_R = { lookup: _('Use routing table'), goto: _('Go to rule'), prohibit: 'prohibit', unreachable: 'unreachable', blackhole: 'blackhole', throw: 'throw' };
+		const mode = cur.action || (cur.goto ? 'goto' : 'lookup');
+
+		const wFam = new ui.Select(fam, { ipv4: 'IPv4', ipv6: 'IPv6' }, { optional: false, sort: false, disabled: !isNew });
+		const wPrio = new ui.Textfield(cur.priority || '', { optional: true, datatype: 'range(1,32765)', placeholder: _('automatic') });
+		const wIn = new ui.Select(cur.in || '', this.ifaceChoices(true), { optional: true, sort: true });
+		const wOut = new ui.Select(cur.out || '', this.ifaceChoices(true), { optional: true, sort: true });
+		const addrDt = () => fam == 'ipv6' ? 'or(cidr6,ip6addr(1))' : 'or(cidr4,ip4addr(1))';
+		const wSrc = new ui.Textfield(cur.src || '', { optional: true, placeholder: fam == 'ipv6' ? '2001:db8::/48' : '192.168.10.0/24' });
+		const wDest = new ui.Textfield(cur.dest || '', { optional: true, placeholder: fam == 'ipv6' ? '2001:db8:1::/48' : '0.0.0.0/0' });
+		const wProto = new ui.Select(cur.ipproto || '', { '': _('any'), tcp: 'TCP', udp: 'UDP', icmp: 'ICMP' }, { optional: true, sort: false });
+		const wDport = new ui.Textfield(cur.dport || '', { optional: true, datatype: 'portrange', placeholder: '443' });
+		const wSport = new ui.Textfield(cur.sport || '', { optional: true, datatype: 'portrange' });
+		const wMark = new ui.Textfield(cur.mark || '', { optional: true, placeholder: '0x10/0xff' });
+		const wTos = new ui.Textfield(cur.tos || '', { optional: true, datatype: 'range(0,255)' });
+		const wUid = new ui.Textfield(cur.uidrange || '', { optional: true, placeholder: '1000-1999' });
+		const wInvert = new ui.Checkbox(cur.invert == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
+		const wMode = new ui.Select(mode, ACTIONS_R, { optional: false, sort: false });
+		const wTable = new ui.Dropdown(cur.lookup || '', this.tableChoices(false), { optional: true, create: true, sort: false, placeholder: _('table name or number') });
+		const wGoto = new ui.Textfield(cur.goto || '', { optional: true, datatype: 'range(1,32765)' });
+		const wSup = new ui.Textfield(cur.suppress_prefixlength || '', { optional: true, datatype: 'range(0,128)', placeholder: _('e.g. 0 = ignore default routes') });
+		const wEnabled = new ui.Checkbox(cur.disabled == '1' ? '0' : '1', { value_enabled: '1', value_disabled: '0' });
+		const errors = E('div');
+
+		const form = E('div', { 'class': 'fwd-form' }, [
+			this.formRow(_('Family'), wFam),
+			this.formRow(_('Priority'), wPrio, _('Rules are evaluated from low to high priority. Empty: netifd picks one.')),
+			E('h5', [ _('Match') ]),
+			this.formRow(_('Incoming interface'), wIn),
+			this.formRow(_('Outgoing interface'), wOut),
+			this.formRow(_('Source'), wSrc, _('Source address or network, e.g. the LAN that should use another uplink.')),
+			this.formRow(_('Destination'), wDest),
+			this.formRow(_('Protocol'), wProto),
+			this.formRow(_('Destination port'), wDport, null, 'dport'),
+			this.formRow(_('Source port'), wSport, null, 'sport'),
+			this.formRow(_('Firewall mark'), wMark, _('mark or mark/mask, e.g. set by a firewall rule.')),
+			this.formRow(_('TOS'), wTos),
+			this.formRow(_('UID range'), wUid),
+			this.formRow(_('Invert match'), wInvert),
+			E('h5', [ _('Action') ]),
+			this.formRow(_('Action'), wMode),
+			this.formRow(_('Routing table'), wTable, _('Name from /etc/iproute2/rt_tables or a number (1-252 for own tables).'), 'table'),
+			this.formRow(_('Go to priority'), wGoto, null, 'goto'),
+			this.formRow(_('Suppress prefix length'), wSup, _('Ignore routes in the table with this prefix length or shorter.'), 'sup'),
+			this.formRow(_('Enabled'), wEnabled),
+			errors
+		]);
+
+		const update = () => {
+			fam = wFam.getValue();
+			const m = wMode.getValue(), pr = wProto.getValue();
+			this.showRow(form, 'table', m == 'lookup');
+			this.showRow(form, 'sup', m == 'lookup');
+			this.showRow(form, 'goto', m == 'goto');
+			this.showRow(form, 'dport', pr == 'tcp' || pr == 'udp');
+			this.showRow(form, 'sport', pr == 'tcp' || pr == 'udp');
+		};
+		form.addEventListener('widget-change', update);
+
+		const save = () => {
+			const v = w => (w.getValue() || '').toString().trim();
+			const msgs = [];
+			const vali = (val, dt) => {
+				if (!val) return true;
+				const vv = validation.create(E('input'), dt);
+				vv.value = val;
+				return vv.vstack[0].apply(vv, vv.vstack[1]) === true;
+			};
+			for (const w of [ wPrio, wDport, wSport, wTos, wGoto, wSup ]) w.triggerValidation && w.triggerValidation();
+			if ([ wPrio, wDport, wSport, wTos, wGoto, wSup ].some(w => w.isValid && !w.isValid())) msgs.push(_('Please correct the highlighted fields.'));
+			if (!vali(v(wSrc), addrDt())) msgs.push(_('Invalid source address.'));
+			if (!vali(v(wDest), addrDt())) msgs.push(_('Invalid destination address.'));
+			if (v(wMark) && !/^(0x[0-9a-fA-F]+|\d+)(\/(0x[0-9a-fA-F]+|\d+))?$/.test(v(wMark))) msgs.push(_('Invalid firewall mark.'));
+			if (v(wUid) && !/^\d+(-\d+)?$/.test(v(wUid))) msgs.push(_('Invalid UID range.'));
+			const m = wMode.getValue();
+			const table = fwm.toList(wTable.getValue())[0] || '';
+			if (m == 'lookup' && !/^[A-Za-z0-9_.-]+$/.test(table)) msgs.push(_('Please choose a routing table.'));
+			if (m == 'goto' && !v(wGoto)) msgs.push(_('Please enter the priority to go to.'));
+			if (msgs.length)
+				return dom.content(errors, msgs.map(x => E('div', { 'class': 'fwd-problem' }, [ x ])));
+
+			const id = isNew ? uci.add('network', fam == 'ipv6' ? 'rule6' : 'rule') : sid;
+			const set = (k, val) => uci.set('network', id, k, val ? val : null);
+			set('priority', v(wPrio)); set('in', v(wIn)); set('out', v(wOut));
+			set('src', v(wSrc)); set('dest', v(wDest)); set('ipproto', v(wProto));
+			const tcpudp = [ 'tcp', 'udp' ].includes(v(wProto));
+			set('dport', tcpudp ? v(wDport) : ''); set('sport', tcpudp ? v(wSport) : '');
+			set('mark', v(wMark)); set('tos', v(wTos)); set('uidrange', v(wUid));
+			set('invert', wInvert.getValue() == '1' ? '1' : '');
+			set('lookup', m == 'lookup' ? table : '');
+			set('suppress_prefixlength', m == 'lookup' ? v(wSup) : '');
+			set('goto', m == 'goto' ? v(wGoto) : '');
+			set('action', (m != 'lookup' && m != 'goto') ? m : '');
+			set('disabled', wEnabled.getValue() == '1' ? '' : '1');
+			ui.hideModal();
+			this.markDirty();
+		};
+
+		ui.showModal(isNew ? _('New routing rule') : _('Edit routing rule'), [
+			form,
+			this.dialogButtons(isNew ? null : () => { uci.remove('network', sid); ui.hideModal(); this.markDirty(); }, save)
+		], 'cbi-modal');
+		update();
+	},
+
+	editRoute(sid, family) {
+		const isNew = !sid;
+		const cur = isNew ? {} : (uci.get('network', sid) || {});
+		let fam = isNew ? (family || 'ipv4') : (cur['.type'] == 'route6' ? 'ipv6' : 'ipv4');
+		let target = cur.target || '';
+		if (target && cur.netmask && target.indexOf('/') < 0) {
+			const bits = cur.netmask.split('.').reduce((n, o) => n + ((+o).toString(2).match(/1/g) || []).length, 0);
+			target += '/' + bits;
+		}
+
+		const wFam = new ui.Select(fam, { ipv4: 'IPv4', ipv6: 'IPv6' }, { optional: false, sort: false, disabled: !isNew });
+		const wIface = new ui.Select(cur.interface || null, this.ifaceChoices(false), { optional: false, sort: true });
+		const wTarget = new ui.Textfield(target, { optional: false, placeholder: fam == 'ipv6' ? '::/0' : '0.0.0.0/0' });
+		const wGw = new ui.Textfield(cur.gateway || '', { optional: true, placeholder: fam == 'ipv6' ? 'fe80::1' : '192.168.178.1' });
+		const wTable = new ui.Dropdown(cur.table || '', this.tableChoices(true), { optional: true, create: true, sort: false });
+		const wMetric = new ui.Textfield(cur.metric || '', { optional: true, datatype: 'uinteger' });
+		const wMtu = new ui.Textfield(cur.mtu || '', { optional: true, datatype: 'range(64,9000)' });
+		const wSource = new ui.Textfield(cur.source || '', { optional: true, placeholder: _('preferred source address') });
+		const wType = new ui.Select(cur.type || '', { '': 'unicast', local: 'local', broadcast: 'broadcast', multicast: 'multicast', unreachable: 'unreachable', prohibit: 'prohibit', blackhole: 'blackhole', anycast: 'anycast' }, { optional: true, sort: false });
+		const wOnlink = new ui.Checkbox(cur.onlink == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
+		const wEnabled = new ui.Checkbox(cur.disabled == '1' ? '0' : '1', { value_enabled: '1', value_disabled: '0' });
+		const errors = E('div');
+
+		const form = E('div', { 'class': 'fwd-form' }, [
+			this.formRow(_('Family'), wFam),
+			this.formRow(_('Interface'), wIface),
+			this.formRow(_('Target'), wTarget, _('Network in CIDR notation; 0.0.0.0/0 (IPv4) or ::/0 (IPv6) is a default route.')),
+			this.formRow(_('Gateway'), wGw),
+			this.formRow(_('Routing table'), wTable, _('Leave on "main" for normal routes; choose your own table for source routing.')),
+			this.formRow(_('Metric'), wMetric),
+			this.formRow(_('MTU'), wMtu),
+			this.formRow(_('Source address'), wSource),
+			this.formRow(_('Route type'), wType),
+			this.formRow(_('On-link'), wOnlink, _('Gateway is reachable on the link even if outside the interface subnet.')),
+			this.formRow(_('Enabled'), wEnabled),
+			errors
+		]);
+		form.addEventListener('widget-change', () => { fam = wFam.getValue(); });
+
+		const save = () => {
+			const v = w => (w.getValue() || '').toString().trim();
+			const vali = (val, dt) => {
+				if (!val) return true;
+				const vv = validation.create(E('input'), dt);
+				vv.value = val;
+				return vv.vstack[0].apply(vv, vv.vstack[1]) === true;
+			};
+			const v6 = fam == 'ipv6';
+			const msgs = [];
+			if (!v(wIface)) msgs.push(_('Please choose an interface.'));
+			if (!vali(v(wTarget), v6 ? 'or(cidr6,ip6addr(1))' : 'or(cidr4,ip4addr(1))') || !v(wTarget)) msgs.push(_('Invalid target network.'));
+			if (!vali(v(wGw), v6 ? 'ip6addr(1)' : 'ip4addr(1)')) msgs.push(_('Invalid gateway.'));
+			if (!vali(v(wSource), v6 ? 'ip6addr(1)' : 'ip4addr(1)')) msgs.push(_('Invalid source address.'));
+			for (const w of [ wMetric, wMtu ]) w.triggerValidation();
+			if (!wMetric.isValid() || !wMtu.isValid()) msgs.push(_('Please correct the highlighted fields.'));
+			const table = fwm.toList(wTable.getValue())[0] || '';
+			if (table && !/^[A-Za-z0-9_.-]+$/.test(table)) msgs.push(_('Invalid routing table.'));
+			if (msgs.length)
+				return dom.content(errors, msgs.map(x => E('div', { 'class': 'fwd-problem' }, [ x ])));
+
+			const id = isNew ? uci.add('network', v6 ? 'route6' : 'route') : sid;
+			const set = (k, val) => uci.set('network', id, k, val ? val : null);
+			set('interface', v(wIface)); set('target', v(wTarget)); set('netmask', '');
+			set('gateway', v(wGw)); set('table', table == 'main' ? '' : table);
+			set('metric', v(wMetric)); set('mtu', v(wMtu)); set('source', v(wSource));
+			set('type', v(wType)); set('onlink', wOnlink.getValue() == '1' ? '1' : '');
+			set('disabled', wEnabled.getValue() == '1' ? '' : '1');
+			ui.hideModal();
+			this.markDirty();
+		};
+
+		ui.showModal(isNew ? _('New route') : _('Edit route'), [
+			form,
+			this.dialogButtons(isNew ? null : () => { uci.remove('network', sid); ui.hideModal(); this.markDirty(); }, save)
+		], 'cbi-modal');
+	},
+
+	showLiveRouting(box) {
+		dom.content(box, E('em', { 'class': 'spinning' }, [ _('Loading…') ]));
+		const cmds = [ [ '-4', 'rule', 'show' ], [ '-6', 'rule', 'show' ], [ '-4', 'route', 'show', 'table', 'all' ], [ '-6', 'route', 'show', 'table', 'all' ] ];
+		return Promise.all(cmds.map(a => L.resolveDefault(fs.exec_direct('/sbin/ip', a), _('(not available)')))).then(res => {
+			dom.content(box, cmds.map((a, i) => E('div', [
+				E('h5', [ 'ip ' + a.join(' ') ]),
+				E('div', { 'class': 'fwd-preview', 'style': 'max-height:22em' }, [ res[i] || _('(empty)') ])
+			])));
+		});
+	},
+
+	renderRouting() {
+		const rules = uci.sections('network').filter(s => s['.type'] == 'rule' || s['.type'] == 'rule6')
+			.sort((a, b) => (+a.priority || 99999) - (+b.priority || 99999));
+		const routes = uci.sections('network').filter(s => s['.type'] == 'route' || s['.type'] == 'route6');
+		const fam = s => s['.type'].slice(-1) == '6' ? 'IPv6' : 'IPv4';
+
+		const ruleRows = rules.map(r => E('tr', { 'class': 'tr' + (r.disabled == '1' ? ' disabled' : '') }, [
+			E('td', { 'class': 'td' }, [ r.priority || E('em', [ _('auto') ]) ]),
+			E('td', { 'class': 'td' }, [ fam(r) ]),
+			E('td', { 'class': 'td' }, [ this.ruleSummary(r) ]),
+			E('td', { 'class': 'td' }, [ E('strong', [ this.ruleAction(r) ]) ]),
+			E('td', { 'class': 'td fwd-actions' }, [
+				this.smallBtn(_('Edit'), 'cbi-button-edit', () => this.editRule(r['.name'])),
+				this.smallBtn(_('Delete'), 'cbi-button-remove', () => { uci.remove('network', r['.name']); this.markDirty(); })
+			])
+		]));
+
+		const routeRows = routes.map(r => E('tr', { 'class': 'tr' + (r.disabled == '1' ? ' disabled' : '') }, [
+			E('td', { 'class': 'td' }, [ r.table || 'main' ]),
+			E('td', { 'class': 'td' }, [ fam(r) ]),
+			E('td', { 'class': 'td fwd-mono' }, [ (r.target || '-') + (r.netmask ? ' / ' + r.netmask : '') ]),
+			E('td', { 'class': 'td' }, [ [ r.gateway ? _('via %s').format(r.gateway) : '', _('dev %s').format(r.interface || '?'), r.metric ? _('metric %s').format(r.metric) : '', r.type || '' ].filter(Boolean).join(', ') ]),
+			E('td', { 'class': 'td fwd-actions' }, [
+				this.smallBtn(_('Edit'), 'cbi-button-edit', () => this.editRoute(r['.name'])),
+				this.smallBtn(_('Delete'), 'cbi-button-remove', () => { uci.remove('network', r['.name']); this.markDirty(); })
+			])
+		]));
+
+		const live = E('div');
+		dom.content(this.routePane, [
+			E('p', { 'class': 'cbi-section-descr' }, [ _('Policy routing (source routing): rules decide which routing table a packet uses, e.g. "traffic from 192.168.179.0/24 uses table dsl", and the table holds the routes, e.g. a default route via the DSL uplink. Stored in /etc/config/network and applied with Save & Apply (with rollback protection).') ]),
+			E('h4', [ _('Routing rules') ]),
+			this.table([ _('Priority'), _('Family'), _('Match'), _('Action'), '' ], ruleRows, _('No routing rules.')),
+			E('div', { 'class': 'fwd-toolbar' }, [
+				this.smallBtn(_('+ IPv4 rule'), 'cbi-button-add', () => this.editRule(null, 'ipv4')),
+				this.smallBtn(_('+ IPv6 rule'), 'cbi-button-add', () => this.editRule(null, 'ipv6'))
+			]),
+			E('h4', [ _('Static routes') ]),
+			this.table([ _('Table'), _('Family'), _('Target'), _('Via'), '' ], routeRows, _('No static routes.')),
+			E('div', { 'class': 'fwd-toolbar' }, [
+				this.smallBtn(_('+ IPv4 route'), 'cbi-button-add', () => this.editRoute(null, 'ipv4')),
+				this.smallBtn(_('+ IPv6 route'), 'cbi-button-add', () => this.editRoute(null, 'ipv6'))
+			]),
+			E('h4', [ _('Active state') ]),
+			E('div', { 'class': 'fwd-toolbar' }, [ this.smallBtn(_('Show active rules and routes'), '', () => this.showLiveRouting(live)) ]),
+			live,
+			Object.keys(this.rtTables).length ? '' : E('p', { 'class': 'cbi-section-descr' }, [ _('No named routing tables in /etc/iproute2/rt_tables; use table numbers (1-252) or add names there.') ])
+		]);
+	},
+
 	/* --- settings (stored in /etc/config/fwdesktop, section global) ----- */
 
 	setting(name) {
@@ -2306,7 +2612,7 @@ return view.extend({
 	/* conntrack filters for one generated section; null = cannot be targeted */
 	ctFiltersFor(sec) {
 		const list = v => fwm.toList(v).length ? fwm.toList(v) : [ '' ];
-		const port = v => /^\d+$/.test(v) ? v : '';
+		const port = v => (/^\d+$/).test(v) ? v : '';
 		const fam = sec.family == 'ipv4' ? '4' : sec.family == 'ipv6' ? '6' : '';
 		let protos = list(sec.proto || (sec['.type'] == 'nat' ? 'all' : 'tcp udp')).join(' ').split(/\s+/);
 		if (protos.includes('all') || protos.includes('any')) protos = [ '' ];

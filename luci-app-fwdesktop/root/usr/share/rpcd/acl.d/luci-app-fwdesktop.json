@@ -3,23 +3,59 @@
 		"description": "Grant access to the object based firewall desktop",
 		"read": {
 			"file": {
-				"/etc/config/firewall": [ "read" ]
+				"/etc/config/firewall": [
+					"read"
+				],
+				"/etc/iproute2/rt_tables": [
+					"read"
+				],
+				"/sbin/ip -4 rule show": [
+					"exec"
+				],
+				"/sbin/ip -6 rule show": [
+					"exec"
+				],
+				"/sbin/ip -4 route show table all": [
+					"exec"
+				],
+				"/sbin/ip -6 route show table all": [
+					"exec"
+				]
 			},
 			"ubus": {
-				"file": [ "read" ],
-				"luci-rpc": [ "getHostHints" ],
-				"network.interface": [ "dump" ]
+				"file": [
+					"read",
+					"exec"
+				],
+				"luci-rpc": [
+					"getHostHints"
+				],
+				"network.interface": [
+					"dump"
+				]
 			},
-			"uci": [ "firewall", "fwdesktop", "network" ]
+			"uci": [
+				"firewall",
+				"fwdesktop",
+				"network"
+			]
 		},
 		"write": {
 			"file": {
-				"/usr/libexec/fwdesktop-ctreset": [ "exec" ]
+				"/usr/libexec/fwdesktop-ctreset": [
+					"exec"
+				]
 			},
 			"ubus": {
-				"file": [ "exec" ]
+				"file": [
+					"exec"
+				]
 			},
-			"uci": [ "firewall", "fwdesktop" ]
+			"uci": [
+				"firewall",
+				"fwdesktop",
+				"network"
+			]
 		}
 	}
 }
