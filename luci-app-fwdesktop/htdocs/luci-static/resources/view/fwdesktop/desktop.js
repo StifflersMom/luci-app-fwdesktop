@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-22';
+const ASSET_REV = '1.0.0-23';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -2325,9 +2325,12 @@ return view.extend({
 		const wGoto = new ui.Textfield(cur.goto || '', { optional: true, datatype: 'range(1,32765)' });
 		const wSup = new ui.Textfield(cur.suppress_prefixlength || '', { optional: true, datatype: 'range(0,128)', placeholder: _('e.g. 0 = ignore default routes') });
 		const wEnabled = new ui.Checkbox(cur.disabled == '1' ? '0' : '1', { value_enabled: '1', value_disabled: '0' });
+		const wComment = new ui.Textfield(cur.comment || '', { optional: true, placeholder: _('e.g. guest network via DSL') });
 		const errors = E('div');
 
 		const form = E('div', { 'class': 'fwd-form' }, [
+			this.formRow(_('Enabled'), wEnabled),
+			this.formRow(_('Comment'), wComment),
 			this.formRow(_('Family'), wFam),
 			this.formRow(_('Priority'), wPrio, _('Rules are evaluated from low to high priority. Empty: netifd picks one.')),
 			E('h5', [ _('Match') ]),
@@ -2347,7 +2350,6 @@ return view.extend({
 			this.formRow(_('Routing table'), wTable, _('Name from /etc/iproute2/rt_tables or a number (1-252 for own tables).'), 'table'),
 			this.formRow(_('Go to priority'), wGoto, null, 'goto'),
 			this.formRow(_('Suppress prefix length'), wSup, _('Ignore routes in the table with this prefix length or shorter.'), 'sup'),
-			this.formRow(_('Enabled'), wEnabled),
 			errors
 		]);
 
@@ -2397,6 +2399,7 @@ return view.extend({
 			set('goto', m == 'goto' ? v(wGoto) : '');
 			set('action', (m != 'lookup' && m != 'goto') ? m : '');
 			set('disabled', wEnabled.getValue() == '1' ? '' : '1');
+			set('comment', v(wComment));
 			ui.hideModal();
 			this.markDirty();
 		};
@@ -2429,9 +2432,12 @@ return view.extend({
 		const wType = new ui.Select(cur.type || '', { '': 'unicast', local: 'local', broadcast: 'broadcast', multicast: 'multicast', unreachable: 'unreachable', prohibit: 'prohibit', blackhole: 'blackhole', anycast: 'anycast' }, { optional: true, sort: false });
 		const wOnlink = new ui.Checkbox(cur.onlink == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
 		const wEnabled = new ui.Checkbox(cur.disabled == '1' ? '0' : '1', { value_enabled: '1', value_disabled: '0' });
+		const wComment = new ui.Textfield(cur.comment || '', { optional: true, placeholder: _('e.g. default route for table dsl') });
 		const errors = E('div');
 
 		const form = E('div', { 'class': 'fwd-form' }, [
+			this.formRow(_('Enabled'), wEnabled),
+			this.formRow(_('Comment'), wComment),
 			this.formRow(_('Family'), wFam),
 			this.formRow(_('Interface'), wIface),
 			this.formRow(_('Target'), wTarget, _('Network in CIDR notation; 0.0.0.0/0 (IPv4) or ::/0 (IPv6) is a default route.')),
@@ -2442,7 +2448,6 @@ return view.extend({
 			this.formRow(_('Source address'), wSource),
 			this.formRow(_('Route type'), wType),
 			this.formRow(_('On-link'), wOnlink, _('Gateway is reachable on the link even if outside the interface subnet.')),
-			this.formRow(_('Enabled'), wEnabled),
 			errors
 		]);
 		form.addEventListener('widget-change', () => { fam = wFam.getValue(); });
@@ -2475,6 +2480,7 @@ return view.extend({
 			set('metric', v(wMetric)); set('mtu', v(wMtu)); set('source', v(wSource));
 			set('type', v(wType)); set('onlink', wOnlink.getValue() == '1' ? '1' : '');
 			set('disabled', wEnabled.getValue() == '1' ? '' : '1');
+			set('comment', v(wComment));
 			ui.hideModal();
 			this.markDirty();
 		};
@@ -2501,11 +2507,17 @@ return view.extend({
 			.sort((a, b) => (+a.priority || 99999) - (+b.priority || 99999));
 		const routes = uci.sections('network').filter(s => s['.type'] == 'route' || s['.type'] == 'route6');
 		const fam = s => s['.type'].slice(-1) == '6' ? 'IPv6' : 'IPv4';
+		const toggle = sec => E('input', {
+			'type': 'checkbox', 'title': _('Enabled'), 'checked': sec.disabled == '1' ? null : '',
+			'change': ev => { uci.set('network', sec['.name'], 'disabled', ev.target.checked ? null : '1'); this.markDirty(); }
+		});
+		const note = sec => sec.comment ? E('div', { 'class': 'fwd-tip-sub' }, [ sec.comment ]) : '';
 
 		const ruleRows = rules.map(r => E('tr', { 'class': 'tr' + (r.disabled == '1' ? ' disabled' : '') }, [
+			E('td', { 'class': 'td' }, [ toggle(r) ]),
 			E('td', { 'class': 'td' }, [ r.priority || E('em', [ _('auto') ]) ]),
 			E('td', { 'class': 'td' }, [ fam(r) ]),
-			E('td', { 'class': 'td' }, [ this.ruleSummary(r) ]),
+			E('td', { 'class': 'td' }, [ this.ruleSummary(r), note(r) ]),
 			E('td', { 'class': 'td' }, [ E('strong', [ this.ruleAction(r) ]) ]),
 			E('td', { 'class': 'td fwd-actions' }, [
 				this.smallBtn(_('Edit'), 'cbi-button-edit', () => this.editRule(r['.name'])),
@@ -2514,9 +2526,10 @@ return view.extend({
 		]));
 
 		const routeRows = routes.map(r => E('tr', { 'class': 'tr' + (r.disabled == '1' ? ' disabled' : '') }, [
+			E('td', { 'class': 'td' }, [ toggle(r) ]),
 			E('td', { 'class': 'td' }, [ r.table || 'main' ]),
 			E('td', { 'class': 'td' }, [ fam(r) ]),
-			E('td', { 'class': 'td fwd-mono' }, [ (r.target || '-') + (r.netmask ? ' / ' + r.netmask : '') ]),
+			E('td', { 'class': 'td' }, [ E('span', { 'class': 'fwd-mono' }, [ (r.target || '-') + (r.netmask ? ' / ' + r.netmask : '') ]), note(r) ]),
 			E('td', { 'class': 'td' }, [ [ r.gateway ? _('via %s').format(r.gateway) : '', _('dev %s').format(r.interface || '?'), r.metric ? _('metric %s').format(r.metric) : '', r.type || '' ].filter(Boolean).join(', ') ]),
 			E('td', { 'class': 'td fwd-actions' }, [
 				this.smallBtn(_('Edit'), 'cbi-button-edit', () => this.editRoute(r['.name'])),
@@ -2528,13 +2541,13 @@ return view.extend({
 		dom.content(this.routePane, [
 			E('p', { 'class': 'cbi-section-descr' }, [ _('Policy routing (source routing): rules decide which routing table a packet uses, e.g. "traffic from 192.168.179.0/24 uses table dsl", and the table holds the routes, e.g. a default route via the DSL uplink. Stored in /etc/config/network and applied with Save & Apply (with rollback protection).') ]),
 			E('h4', [ _('Routing rules') ]),
-			this.table([ _('Priority'), _('Family'), _('Match'), _('Action'), '' ], ruleRows, _('No routing rules.')),
+			this.table([ _('On'), _('Priority'), _('Family'), _('Match / comment'), _('Action'), '' ], ruleRows, _('No routing rules.')),
 			E('div', { 'class': 'fwd-toolbar' }, [
 				this.smallBtn(_('+ IPv4 rule'), 'cbi-button-add', () => this.editRule(null, 'ipv4')),
 				this.smallBtn(_('+ IPv6 rule'), 'cbi-button-add', () => this.editRule(null, 'ipv6'))
 			]),
 			E('h4', [ _('Static routes') ]),
-			this.table([ _('Table'), _('Family'), _('Target'), _('Via'), '' ], routeRows, _('No static routes.')),
+			this.table([ _('On'), _('Table'), _('Family'), _('Target / comment'), _('Via'), '' ], routeRows, _('No static routes.')),
 			E('div', { 'class': 'fwd-toolbar' }, [
 				this.smallBtn(_('+ IPv4 route'), 'cbi-button-add', () => this.editRoute(null, 'ipv4')),
 				this.smallBtn(_('+ IPv6 route'), 'cbi-button-add', () => this.editRoute(null, 'ipv6'))
