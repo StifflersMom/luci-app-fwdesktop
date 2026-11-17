@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>luci-app-fwdesktop package feed</title>
+<style>
+	body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+	pre { background: #f2f2f2; padding: .8rem; overflow-x: auto; }
+	@media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } pre { background: #2b2b2b; } a { color: #8ab4f8; } }
+</style>
+</head>
+<body>
+<h1>luci-app-fwdesktop package feed</h1>
+<p>Signed apk feed for OpenWrt 25.12 (the package is architecture independent).
+Source and documentation: <a href="https://github.com/StifflersMom/luci-app-fwdesktop">github.com/StifflersMom/luci-app-fwdesktop</a>.</p>
+<h2>One time setup on the router</h2>
+<pre>wget -O /etc/apk/keys/fwdesktop-feed.pem https://stifflersmom.github.io/luci-app-fwdesktop/fwdesktop-feed.pem
+echo "https://stifflersmom.github.io/luci-app-fwdesktop/packages.adb" &gt;&gt; /etc/apk/repositories.d/customfeeds.list</pre>
+<h2>Install and update</h2>
+<pre>apk update
+apk add luci-app-fwdesktop      # install
+apk upgrade luci-app-fwdesktop  # later updates</pre>
+</body>
+</html>

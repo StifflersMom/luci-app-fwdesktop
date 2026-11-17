@@ -12,3 +12,5 @@ buildsystem/
 .sdk/
 # local install helper
 installonwtalcore.sh
+# feed signing private key (lives only on openwrtdev and in the GitHub secret)
+keys/

@@ -55,6 +55,26 @@ and `nat` sections.
 
 ## Installation
 
+### Package feed (recommended)
+
+A signed apk feed is published on GitHub Pages with every release. Set it up
+once on the router:
+
+```sh
+wget -O /etc/apk/keys/fwdesktop-feed.pem https://stifflersmom.github.io/luci-app-fwdesktop/fwdesktop-feed.pem
+echo "https://stifflersmom.github.io/luci-app-fwdesktop/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+```
+
+Then install and later update like any other package:
+
+```sh
+apk update
+apk add luci-app-fwdesktop
+apk upgrade luci-app-fwdesktop
+```
+
+The public key is also in this repository as `feed/fwdesktop-feed.pem`.
+
 ### Prebuilt package
 
 Download `luci-app-fwdesktop-*.apk` from the

@@ -1,7 +1,8 @@
 name: release
 
 # Push a tag like v1.0.0-r9 (= PKG_VERSION-rPKG_RELEASE) to build the apk
-# with the official OpenWrt SDK and publish it as a GitHub release.
+# with the official OpenWrt SDK, publish it as a GitHub release and update
+# the signed apk package feed on GitHub Pages.
 on:
   push:
     tags:
@@ -13,6 +14,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    outputs:
+      feed: ${{ steps.feed.outputs.feed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,8 +50,55 @@ jobs:
           files: ${{ steps.build.outputs.apk }}
           generate_release_notes: true
           body: |
-            Install on OpenWrt 25.12:
+            Install on OpenWrt 25.12 from the package feed (see README), or directly:
 
                 apk add --allow-untrusted luci-app-fwdesktop-*.apk
 
             Then open Network → Firewall Desktop.
+
+      # The feed is signed with the private key in the APK_FEED_KEY secret.
+      # Without the secret the release still works, only the feed is skipped.
+      - name: Build signed package feed
+        id: feed
+        env:
+          APK_FEED_KEY: ${{ secrets.APK_FEED_KEY }}
+        run: |
+          if [ -z "$APK_FEED_KEY" ]; then
+            echo "APK_FEED_KEY secret not set, skipping the package feed"
+            echo "feed=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          apktool=$(ls "$RUNNER_TEMP"/sdk/openwrt-sdk-*/staging_dir/host/bin/apk | head -n1)
+          keydir="$RUNNER_TEMP/feedkey"
+          mkdir -m 700 "$keydir"
+          printf '%s\n' "$APK_FEED_KEY" > "$keydir/fwdesktop-feed.pem"
+          mkdir -p site
+          cp "${{ steps.build.outputs.apk }}" site/
+          cp feed/fwdesktop-feed.pem site/fwdesktop-feed.pem
+          cp feed/index.html site/index.html
+          ( cd site && "$apktool" mkndx --allow-untrusted --keys-dir "$keydir" \
+              --sign "$keydir/fwdesktop-feed.pem" --output packages.adb *.apk )
+          rm -rf "$keydir"
+          ls -l site
+          echo "feed=yes" >> "$GITHUB_OUTPUT"
+
+      - name: Upload feed for GitHub Pages
+        if: steps.feed.outputs.feed == 'yes'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: build
+    if: needs.build.outputs.feed == 'yes'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy package feed to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
