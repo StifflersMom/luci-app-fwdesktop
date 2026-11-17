@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-15';
+const ASSET_REV = '1.0.0-16';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -132,6 +132,7 @@ return view.extend({
 		this.objPane = E('div');
 		this.svcPane = E('div');
 		this.setPane = E('div');
+		this.backupPane = E('div');
 		this.previewPane = E('div');
 
 		const tabs = E('div', {}, [
@@ -143,6 +144,7 @@ return view.extend({
 			E('div', { 'data-tab': 'objects', 'data-tab-title': _('Objects') }, [ this.objPane ]),
 			E('div', { 'data-tab': 'services', 'data-tab-title': _('Services') }, [ this.svcPane ]),
 			E('div', { 'data-tab': 'ipsets', 'data-tab-title': _('IP sets') }, [ this.setPane ]),
+			E('div', { 'data-tab': 'backup', 'data-tab-title': _('Backup') }, [ this.backupPane ]),
 			E('div', { 'data-tab': 'preview', 'data-tab-title': _('Generated rules') }, [ this.previewPane ])
 		]);
 
@@ -230,6 +232,7 @@ return view.extend({
 		this.renderObjects();
 		this.renderServices();
 		this.renderSets();
+		this.renderBackup();
 		this.renderPreview();
 
 		const n = this.gen.problems.length;
@@ -1912,6 +1915,193 @@ return view.extend({
 				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
 				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': doDelete }, [ _('Delete') ])
 			])
+		]);
+	},
+
+	/* --- backup / restore of /etc/config/firewall + /etc/config/fwdesktop --- */
+
+	backupConfigs() {
+		return [ 'firewall', 'fwdesktop' ];
+	},
+
+	exportConfig(conf) {
+		return uci.sections(conf).map(sec => {
+			const out = { '.type': sec['.type'] };
+			if (sec['.anonymous'])
+				out['.anonymous'] = true;
+			else
+				out['.name'] = sec['.name'];
+			for (const k in sec)
+				if (k.charAt(0) != '.')
+					out[k] = Array.isArray(sec[k]) ? sec[k].slice() : String(sec[k]);
+			return out;
+		});
+	},
+
+	downloadBackup() {
+		const data = {
+			format: 'luci-app-fwdesktop-backup',
+			version: 1,
+			created: new Date().toISOString(),
+			app: ASSET_REV,
+			configs: {}
+		};
+		for (const conf of this.backupConfigs())
+			data.configs[conf] = this.exportConfig(conf);
+
+		const blob = new Blob([ JSON.stringify(data, null, '\t') + '\n' ], { type: 'application/json' });
+		const stamp = data.created.replace(/[:T]/g, '-').replace(/\..*$/, '');
+		const a = E('a', { 'href': URL.createObjectURL(blob), 'download': 'firewall-backup-' + stamp + '.json', 'style': 'display:none' });
+		document.body.appendChild(a);
+		a.click();
+		window.setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+	},
+
+	/* returns an error string or null */
+	validateBackup(data) {
+		if (!data || data.format != 'luci-app-fwdesktop-backup' || data.version != 1 || typeof data.configs != 'object')
+			return _('This is not a Firewall Desktop backup file.');
+
+		const nameRe = new RegExp('^[A-Za-z0-9_]+$');
+		for (const conf of this.backupConfigs()) {
+			const list = data.configs[conf];
+			if (list == null)
+				continue;
+			if (!Array.isArray(list))
+				return _('Invalid data for %s.').format(conf);
+			for (const sec of list) {
+				if (!sec || typeof sec['.type'] != 'string' || !nameRe.test(sec['.type']))
+					return _('Invalid section type in %s.').format(conf);
+				if (!sec['.anonymous'] && !(typeof sec['.name'] == 'string' && nameRe.test(sec['.name'])))
+					return _('Invalid section name in %s.').format(conf);
+				for (const k in sec) {
+					if (k.charAt(0) == '.')
+						continue;
+					const v = sec[k];
+					if (!nameRe.test(k) || !(typeof v == 'string' || (Array.isArray(v) && v.every(x => typeof x == 'string'))))
+						return _('Invalid option "%s" in %s.').format(k, conf);
+				}
+			}
+		}
+
+		const fw = data.configs.firewall;
+		if (!Array.isArray(fw))
+			return _('The backup contains no firewall configuration.');
+		if (!fw.some(sec => sec['.type'] == 'defaults') || !fw.some(sec => sec['.type'] == 'zone'))
+			return _('The firewall configuration in the backup has no defaults or no zones; restoring it would leave the router unprotected.');
+
+		return null;
+	},
+
+	backupSummary(lists) {
+		const count = (conf, type) => (lists[conf] || []).filter(sec => sec['.type'] == type).length;
+		return [
+			[ _('Zones'), count('firewall', 'zone') ],
+			[ _('Forwardings'), count('firewall', 'forwarding') ],
+			[ _('Rules'), count('firewall', 'rule') ],
+			[ _('Port forwards'), count('firewall', 'redirect') ],
+			[ _('NAT rules'), count('firewall', 'nat') ],
+			[ _('IP sets'), count('firewall', 'ipset') ],
+			[ _('Includes'), count('firewall', 'include') ],
+			[ _('Desktop objects'), count('fwdesktop', 'object') ],
+			[ _('Connections'), count('fwdesktop', 'connection') ],
+			[ _('Custom services'), count('fwdesktop', 'service') ]
+		];
+	},
+
+	restoreDialog(data, fileName) {
+		const err = this.validateBackup(data);
+		if (err)
+			return ui.showModal(_('Restore backup'), [
+				E('p', { 'class': 'fwd-problem' }, [ err ]),
+				E('div', { 'class': 'fwd-dialog-buttons' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Close') ]) ])
+			]);
+
+		const cur = {};
+		for (const conf of this.backupConfigs())
+			cur[conf] = this.exportConfig(conf);
+		const a = this.backupSummary(cur), b = this.backupSummary(data.configs);
+		const confs = this.backupConfigs().filter(conf => Array.isArray(data.configs[conf]));
+
+		ui.showModal(_('Restore backup'), [
+			E('p', [ _('File: %s, created %s.').format(fileName, data.created ? new Date(data.created).toLocaleString() : '?') ]),
+			E('p', [ _('The following configurations are replaced completely: %s').format(confs.map(c => '/etc/config/' + c).join(', ')) ]),
+			E('table', { 'class': 'table fwd-table' }, [
+				E('tr', { 'class': 'tr table-titles' }, [ E('th', { 'class': 'th' }, [ '' ]), E('th', { 'class': 'th' }, [ _('Now') ]), E('th', { 'class': 'th' }, [ _('Backup') ]) ])
+			].concat(a.map((row, i) => E('tr', { 'class': 'tr' + (row[1] != b[i][1] ? ' fwd-changed' : '') }, [
+				E('td', { 'class': 'td' }, [ row[0] ]), E('td', { 'class': 'td' }, [ String(row[1]) ]), E('td', { 'class': 'td' }, [ String(b[i][1]) ])
+			])))),
+			E('p', [ _('The restore is applied with LuCI\'s rollback protection: if the router is no longer reachable afterwards, the previous configuration comes back automatically after a short time.') ]),
+			E('div', { 'class': 'fwd-dialog-buttons' }, [
+				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': ui.createHandlerFn(this, () => this.restoreBackup(data, confs)) }, [ _('Restore and apply') ])
+			])
+		], 'cbi-modal');
+	},
+
+	restoreBackup(data, confs) {
+		ui.showModal(_('Restoring…'), [ E('p', { 'class': 'spinning' }, [ _('Writing the configuration…') ]) ]);
+
+		/*
+		 * Step 1 removes every section, step 2 recreates all sections in the
+		 * backup's order. Separate saves avoid uci.js mixing deletes and
+		 * creates of the same names in one request.
+		 */
+		for (const conf of confs)
+			for (const sec of uci.sections(conf))
+				uci.remove(conf, sec['.name']);
+
+		return uci.save().then(() => {
+			for (const conf of confs) {
+				for (const sec of data.configs[conf]) {
+					const sid = sec['.anonymous'] ? uci.add(conf, sec['.type']) : uci.add(conf, sec['.type'], sec['.name']);
+					for (const k in sec)
+						if (k.charAt(0) != '.')
+							uci.set(conf, sid, k, sec[k]);
+				}
+			}
+			return uci.save();
+		}).then(() => {
+			this.dirty = false;
+			ui.hideModal();
+			/* standard apply with rollback; the page reloads afterwards */
+			return ui.changes.apply(true);
+		}).catch(e => {
+			ui.showModal(_('Restore failed'), [
+				E('p', { 'class': 'fwd-problem' }, [ String(e && e.message || e) ]),
+				E('p', [ _('Nothing was applied. Use "Reset" or revert the pending changes to return to the previous state.') ]),
+				E('div', { 'class': 'fwd-dialog-buttons' }, [ E('button', { 'class': 'cbi-button', 'click': () => window.location.reload() }, [ _('Reload') ]) ])
+			]);
+		});
+	},
+
+	renderBackup() {
+		const fileInput = E('input', { 'type': 'file', 'accept': '.json,application/json', 'style': 'display:none' });
+		fileInput.addEventListener('change', () => {
+			const f = fileInput.files && fileInput.files[0];
+			if (!f) return;
+			f.text().then(txt => {
+				let data = null;
+				try { data = JSON.parse(txt); } catch (e) {}
+				this.restoreDialog(data, f.name);
+			});
+			fileInput.value = '';
+		});
+
+		dom.content(this.backupPane, [
+			E('div', { 'class': 'cbi-section' }, [
+				E('h4', [ _('Download backup') ]),
+				E('p', [ _('Saves /etc/config/firewall (zones, forwardings, all rules and port forwards, IP sets) and /etc/config/fwdesktop (objects, connections, services, layout, colours) into one file.') ]),
+				this.dirty ? E('p', { 'class': 'fwd-problem' }, [ _('There are unsaved changes on this page; they are included in the backup. Press "Save & Apply" first if you want a backup of the active configuration.') ]) : '',
+				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.downloadBackup()) }, [ _('Download backup') ])
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h4', [ _('Restore backup') ]),
+				E('p', [ _('Replaces both configurations with the contents of a backup file. You see a summary before anything is changed, and the restore is applied with rollback protection.') ]),
+				fileInput,
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': () => fileInput.click() }, [ _('Choose backup file…') ])
+			]),
+			E('p', { 'class': 'cbi-section-descr' }, [ _('Note: files referenced by the firewall configuration (include scripts, IP set load files) are not part of the backup.') ])
 		]);
 	},
 

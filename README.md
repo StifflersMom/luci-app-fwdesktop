@@ -25,6 +25,9 @@ and `nat` sections.
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it
   to manage them in one dialog, merge connections that only differ in services.
+- **Backup / restore:** download `/etc/config/firewall` and `/etc/config/fwdesktop`
+  as one JSON file and restore it with a preview; restores are applied with
+  LuCI's rollback protection.
 - **Colours:** give any object its own symbol colour (RGB picker); stored in
   `/etc/config/fwdesktop`, never in the firewall configuration.
 - **IP set management:** create, edit, rename and delete fw4 IP sets (entries,

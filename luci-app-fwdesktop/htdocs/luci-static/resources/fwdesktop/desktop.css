@@ -429,3 +429,5 @@ body.fwd-max .fwd-canvas-wrap {
 	box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25);
 }
 .fwd-swatch:hover { transform: scale(1.15); }
+
+.fwd-table tr.fwd-changed td { font-weight: bold; }
