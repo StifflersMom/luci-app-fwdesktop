@@ -1,0 +1,30 @@
+// New network object: subnet choices follow the selected zone.
+const { chromium } = require('playwright');
+const out = process.argv[2] || '.';
+const BASE = process.env.BASE || 'http://127.0.0.1:8081';
+(async () => {
+  const b = await chromium.launch();
+  const p = await b.newPage({ viewport: { width: 1600, height: 1000 } });
+  const errs = []; p.on('pageerror', e => errs.push(String(e)));
+  await p.goto(BASE + '/cgi-bin/luci/'); await p.fill('input[name=luci_password]', 'test1234'); await p.click('button.cbi-button-positive');
+  await p.waitForLoadState('networkidle'); errs.length = 0;
+  await p.goto(BASE + '/cgi-bin/luci/admin/network/fwdesktop'); await p.waitForSelector('.fwd-node'); await p.waitForTimeout(400);
+  const row = l => p.locator('.modal .fwd-row', { has: p.locator('label', { hasText: l }) }).first();
+  const choices = async () => (await row('Networks').locator('.cbi-dropdown li[data-value]').evaluateAll(els => els.map(e => e.getAttribute('data-value')).filter(v => v && v != '-')));
+  await p.click('.fwd-toolbar button.fwd-add.fwd-type-network'); await p.waitForSelector('.modal .fwd-form');
+  await row('Name').locator('input').fill('LAN net');
+  await row('Zone').locator('select').selectOption('lan'); await p.waitForTimeout(200);
+  const lan = await choices();
+  await row('Networks').locator('.cbi-dropdown').click(); await p.waitForTimeout(200);
+  await p.screenshot({ path: out + '/netchoices.png' });
+  await row('Networks').locator('.cbi-dropdown li[data-value="10.0.2.0/24"]').first().click();
+  await p.keyboard.press('Escape').catch(()=>{}); await p.click('.modal h4');
+  await row('Zone').locator('select').selectOption('wan'); await p.waitForTimeout(200);
+  const wan = await choices();
+  const kept = await row('Networks').locator('input[type=hidden]').evaluateAll(els => els.map(e => e.value));
+  await row('Zone').locator('select').selectOption('lan'); await p.waitForTimeout(200);
+  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(300);
+  const node = await p.locator('.fwd-node .fwd-title', { hasText: 'LAN net' }).count();
+  console.log('lan:', JSON.stringify(lan)); console.log('wan:', JSON.stringify(wan)); console.log('kept value:', JSON.stringify(kept), 'node:', node, 'errors:', JSON.stringify(errs));
+  await b.close();
+})();

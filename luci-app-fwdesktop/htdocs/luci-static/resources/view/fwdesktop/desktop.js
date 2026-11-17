@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-17';
+const ASSET_REV = '1.0.0-19';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -84,6 +84,29 @@ function trunc(s, n) {
 
 function snap(v) {
 	return Math.round(v / GRID) * GRID;
+}
+
+function intToIp4(n) {
+	return [ n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255 ].join('.');
+}
+
+/* network part of an IPv6 address for a given prefix length, compressed */
+function ip6Network(addr, len) {
+	const halves = String(addr).split('::');
+	const head = halves[0] ? halves[0].split(':') : [];
+	const tail = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
+	const words = head.concat(Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), tail).map(w => parseInt(w || '0', 16) || 0);
+	for (let i = 0; i < 8; i++) {
+		const bits = Math.max(0, Math.min(16, len - i * 16));
+		words[i] &= bits ? (0xffff << (16 - bits)) & 0xffff : 0;
+	}
+	let hex = words.map(w => w.toString(16)).join(':');
+	const runs = hex.match(/(^|:)0(:0)+(:|$)/g);
+	if (runs) {
+		const longest = runs.reduce((a, b) => b.length > a.length ? b : a);
+		hex = hex.replace(longest, '::');
+	}
+	return hex.replace(/^:([^:])/, '::$1') + '/' + len;
 }
 
 function ip4ToInt(ip) {
@@ -1085,6 +1108,33 @@ return view.extend({
 		return null;
 	},
 
+	/* subnets of the interfaces covered by a zone, from the live interface state */
+	zoneNetworkChoices(zone) {
+		const c = {};
+		const zs = uci.sections('firewall', 'zone').filter(z => z.name == zone)[0];
+		if (!zs)
+			return c;
+		const nets = fwm.toList(zs.network);
+		for (const ifc of this.ifaces) {
+			if (!nets.includes(ifc.interface))
+				continue;
+			const add = (cidr, note) => { if (!c[cidr]) c[cidr] = '%s (%s%s)'.format(cidr, ifc.interface, note ? ', ' + note : ''); };
+			for (const a of (ifc['ipv4-address'] || [])) {
+				const ip = ip4ToInt(a.address), m = +a.mask;
+				if (ip == null || !(m >= 0 && m <= 32)) continue;
+				const mask = m ? (~0 << (32 - m)) >>> 0 : 0;
+				add(intToIp4((ip & mask) >>> 0) + '/' + m);
+			}
+			for (const a of (ifc['ipv6-prefix-assignment'] || []))
+				if (a.address && a.mask) add(ip6Network(a.address, +a.mask), _('IPv6 prefix'));
+			for (const a of (ifc['ipv6-address'] || []))
+				if (a.address && a.mask && !/^fe80:/i.test(a.address)) add(ip6Network(a.address, +a.mask));
+		}
+		for (const sn of fwm.toList(zs.subnet))
+			if (!c[sn]) c[sn] = '%s (%s)'.format(sn, _('zone subnet'));
+		return c;
+	},
+
 	hostChoices() {
 		const c = {};
 		for (const mac in this.hints) {
@@ -1107,10 +1157,11 @@ return view.extend({
 		const wLabel = new ui.Textfield(o.label, { optional: o.type == 'ipset', placeholder: o.type == 'ipset' ? _('same as the set name') : TYPE_LABELS[o.type] });
 		const wZone = new ui.Select(o.zone || (o.type == 'zone' ? null : this.zones[0]), this.zoneChoices(), { optional: false });
 		let zoneTouched = !isNew;
-		const wAddr = new ui.DynamicList(o.address, (o.type == 'host') ? this.hostChoices() : {}, {
+		const makeAddr = (values, zone) => new ui.DynamicList(values, (o.type == 'host') ? this.hostChoices() : this.zoneNetworkChoices(zone), {
 			datatype: o.type == 'host' ? 'ipaddr(1)' : 'or(cidr,iprange,ipaddr(1))',
 			optional: false
 		});
+		let wAddr = makeAddr(o.address, o.zone || this.zones[0]);
 		const memberChoices = {};
 		for (const mid in this.model.objects) {
 			const m = this.model.objects[mid];
@@ -1190,8 +1241,17 @@ return view.extend({
 		const form = E('div', { 'class': 'fwd-form' }, rows);
 
 		form.addEventListener('widget-change', ev => {
-			if (wZone.node && wZone.node.contains(ev.target))
+			if (wZone.node && wZone.node.contains(ev.target)) {
 				zoneTouched = true;
+				/* offer the subnets of the newly selected zone */
+				if (o.type == 'network' && wAddr.node && wAddr.node.parentNode) {
+					const next = makeAddr(fwm.toList(wAddr.getValue()), wZone.getValue());
+					const old = wAddr.node;
+					old.parentNode.replaceChild(next.render(), old);
+					wAddr = next;
+				}
+				return;
+			}
 			if (!zoneTouched && (o.type == 'host' || o.type == 'network')) {
 				const z = this.zoneForAddress(wAddr.getValue()[0]);
 				if (z) wZone.setValue(z);
