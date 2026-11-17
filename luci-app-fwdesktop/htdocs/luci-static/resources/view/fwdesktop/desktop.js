@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-16';
+const ASSET_REV = '1.0.0-17';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -133,6 +133,7 @@ return view.extend({
 		this.svcPane = E('div');
 		this.setPane = E('div');
 		this.backupPane = E('div');
+		this.zonePane = E('div');
 		this.previewPane = E('div');
 
 		const tabs = E('div', {}, [
@@ -143,6 +144,7 @@ return view.extend({
 			E('div', { 'data-tab': 'connections', 'data-tab-title': _('Connections') }, [ this.connPane ]),
 			E('div', { 'data-tab': 'objects', 'data-tab-title': _('Objects') }, [ this.objPane ]),
 			E('div', { 'data-tab': 'services', 'data-tab-title': _('Services') }, [ this.svcPane ]),
+			E('div', { 'data-tab': 'zones', 'data-tab-title': _('Zones') }, [ this.zonePane ]),
 			E('div', { 'data-tab': 'ipsets', 'data-tab-title': _('IP sets') }, [ this.setPane ]),
 			E('div', { 'data-tab': 'backup', 'data-tab-title': _('Backup') }, [ this.backupPane ]),
 			E('div', { 'data-tab': 'preview', 'data-tab-title': _('Generated rules') }, [ this.previewPane ])
@@ -222,6 +224,7 @@ return view.extend({
 	},
 
 	refresh() {
+		this.zones = uci.sections('firewall', 'zone').map(z => z.name).filter(Boolean);
 		this.gen = fwm.generate(this.model);
 		this.problems = {};
 		for (const p of this.gen.problems)
@@ -232,6 +235,7 @@ return view.extend({
 		this.renderObjects();
 		this.renderServices();
 		this.renderSets();
+		this.renderZones();
 		this.renderBackup();
 		this.renderPreview();
 
@@ -1745,6 +1749,217 @@ return view.extend({
 			E('div', { 'class': 'fwd-toolbar' }, [
 				...this.addObjectButtons()
 			])
+		]);
+	},
+
+	/* --- fw4 zone management -------------------------------------------- */
+
+	zoneSection(name) {
+		return uci.sections('firewall', 'zone').filter(z => z.name == name)[0];
+	},
+
+	/* hand written rules / redirects / nat sections that name the zone */
+	zoneRuleUsers(name) {
+		return uci.sections('firewall').filter(sec =>
+			[ 'rule', 'redirect', 'nat' ].includes(sec['.type']) && !fwm.isOwnedFirewallSection(sec) &&
+			(sec.src == name || sec.dest == name));
+	},
+
+	zoneObjectUsers(name) {
+		return Object.values(this.model.objects).filter(o => o.type != 'router' && o.type != 'group' && o.zone == name);
+	},
+
+	networkChoices() {
+		const c = {};
+		for (const ifc of uci.sections('network', 'interface'))
+			if (ifc['.name'] != 'loopback')
+				c[ifc['.name']] = ifc['.name'] + (ifc.proto ? ' (' + ifc.proto + ')' : '');
+		return c;
+	},
+
+	editZone(sid) {
+		const isNew = !sid;
+		const cur = isNew ? { input: 'ACCEPT', output: 'ACCEPT', forward: 'REJECT' } : (uci.get('firewall', sid) || {});
+		const oldName = cur.name || '';
+		const POL = { ACCEPT: _('accept'), REJECT: _('reject'), DROP: _('drop') };
+		const otherZones = {};
+		for (const z of this.zones) if (z != oldName) otherZones[z] = z;
+		const fwds = uci.sections('firewall', 'forwarding').filter(f => f.enabled != '0');
+		const fwdTo = fwds.filter(f => f.src == oldName && oldName).map(f => f.dest);
+		const fwdFrom = fwds.filter(f => f.dest == oldName && oldName).map(f => f.src);
+
+		const wName = new ui.Textfield(oldName, { optional: false, datatype: 'ucifw4zonename', placeholder: 'guest' });
+		const wIn = new ui.Select(cur.input || 'DROP', POL, { optional: false, sort: false });
+		const wOut = new ui.Select(cur.output || 'DROP', POL, { optional: false, sort: false });
+		const wFwd = new ui.Select(cur.forward || 'DROP', POL, { optional: false, sort: false });
+		const wMasq = new ui.Checkbox(cur.masq == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
+		const wMss = new ui.Checkbox(cur.mtu_fix == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
+		const wNets = new ui.Dropdown(fwm.toList(cur.network), this.networkChoices(), { multiple: true, optional: true, display_items: 5, placeholder: _('-- none --') });
+		const wTo = new ui.Dropdown(fwdTo, otherZones, { multiple: true, optional: true, display_items: 5, placeholder: _('-- none --') });
+		const wFrom = new ui.Dropdown(fwdFrom, otherZones, { multiple: true, optional: true, display_items: 5, placeholder: _('-- none --') });
+		const wObj = new ui.Checkbox('1', { value_enabled: '1', value_disabled: '0' });
+		const errors = E('div');
+
+		const form = E('div', { 'class': 'fwd-form' }, [
+			this.formRow(_('Name'), wName),
+			this.formRow(_('Input'), wIn, _('Traffic from this zone to the router itself.')),
+			this.formRow(_('Output'), wOut, _('Traffic from the router into this zone.')),
+			this.formRow(_('Forward'), wFwd, _('Traffic between networks of this zone, and from it to zones without an explicit forwarding.')),
+			this.formRow(_('Masquerading'), wMasq, _('Hide traffic leaving through this zone behind the router address (typical for WAN zones).')),
+			this.formRow(_('MSS clamping'), wMss),
+			this.formRow(_('Covered networks'), wNets, _('A network can belong to one zone only; it is removed from its previous zone.')),
+			this.formRow(_('Allow forward to'), wTo, _('Zone forwardings: all traffic from this zone to these zones is allowed (shown as dotted lines on the desktop).')),
+			this.formRow(_('Allow forward from'), wFrom),
+			isNew ? this.formRow(_('Add to desktop'), wObj, _('Create a zone object for the new zone.')) : '',
+			errors
+		]);
+
+		const save = () => {
+			wName.triggerValidation();
+			const name = wName.getValue().trim();
+			const msgs = [];
+			if (!name || !wName.isValid()) msgs.push(_('Please enter a valid zone name.'));
+			else if (name != oldName && this.zoneSection(name)) msgs.push(_('A zone named "%s" already exists.').format(name));
+			if (msgs.length)
+				return dom.content(errors, msgs.map(m => E('div', { 'class': 'fwd-problem' }, [ m ])));
+
+			const id = isNew ? uci.add('firewall', 'zone') : sid;
+			const nets = fwm.toList(wNets.getValue());
+			uci.set('firewall', id, 'name', name);
+			uci.set('firewall', id, 'input', wIn.getValue());
+			uci.set('firewall', id, 'output', wOut.getValue());
+			uci.set('firewall', id, 'forward', wFwd.getValue());
+			uci.set('firewall', id, 'masq', wMasq.getValue() == '1' ? '1' : null);
+			uci.set('firewall', id, 'mtu_fix', wMss.getValue() == '1' ? '1' : null);
+			uci.set('firewall', id, 'network', nets.length ? nets : null);
+
+			/* a network belongs to one zone only */
+			for (const z of uci.sections('firewall', 'zone')) {
+				if (z['.name'] == id) continue;
+				const left = fwm.toList(z.network).filter(n => !nets.includes(n));
+				if (left.length != fwm.toList(z.network).length)
+					uci.set('firewall', z['.name'], 'network', left.length ? left : null);
+			}
+
+			/* rename: follow through to forwardings, hand written rules and desktop objects */
+			if (!isNew && oldName && name != oldName) {
+				for (const sec of uci.sections('firewall')) {
+					if (![ 'forwarding', 'rule', 'redirect', 'nat' ].includes(sec['.type']) || fwm.isOwnedFirewallSection(sec)) continue;
+					if (sec.src == oldName) uci.set('firewall', sec['.name'], 'src', name);
+					if (sec.dest == oldName) uci.set('firewall', sec['.name'], 'dest', name);
+				}
+				for (const o of this.zoneObjectUsers(oldName)) {
+					o.zone = name;
+					if (o.type == 'zone' && o.label == oldName.toUpperCase()) o.label = name.toUpperCase();
+				}
+			}
+
+			/* forwardings of this zone: replace with the selected ones */
+			for (const f of uci.sections('firewall', 'forwarding'))
+				if (f.src == name || f.dest == name || (oldName && (f.src == oldName || f.dest == oldName)))
+					uci.remove('firewall', f['.name']);
+			const addFwd = (src, dest) => {
+				const fid = uci.add('firewall', 'forwarding');
+				uci.set('firewall', fid, 'src', src);
+				uci.set('firewall', fid, 'dest', dest);
+			};
+			for (const z of fwm.toList(wTo.getValue())) addFwd(name, z);
+			for (const z of fwm.toList(wFrom.getValue())) addFwd(z, name);
+
+			if (isNew && wObj.getValue() == '1') {
+				const oid = fwm.randomId('o', this.model.objects);
+				const r = this.svg.getBoundingClientRect();
+				this.model.objects[oid] = {
+					id: oid, type: 'zone', zone: name, label: name.toUpperCase(), address: [], member: [], comment: '', color: '',
+					x: snap(((r.width || 600) / 2 - this.pan.x) / this.pan.k), y: snap(((r.height || 400) / 2 - this.pan.y) / this.pan.k)
+				};
+			}
+
+			ui.hideModal();
+			this.markDirty();
+		};
+
+		ui.showModal(isNew ? _('New zone') : _('Edit zone %s').format(oldName), [
+			form,
+			this.dialogButtons(isNew ? null : () => { ui.hideModal(); this.deleteZone(sid); }, save)
+		], 'cbi-modal');
+	},
+
+	deleteZone(sid) {
+		const z = uci.get('firewall', sid);
+		if (!z) return;
+		const rules = this.zoneRuleUsers(z.name);
+
+		if (rules.length)
+			return ui.showModal(_('Zone in use'), [
+				E('p', [ _('The zone "%s" is used by these firewall rules that were not created on the desktop:').format(z.name) ]),
+				E('ul', rules.map(r => E('li', [ r.name || r['.name'] ]))),
+				E('p', [ _('Change or delete those rules first (Network → Firewall), or import them into the desktop.') ]),
+				E('div', { 'class': 'fwd-dialog-buttons' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Close') ]) ])
+			]);
+
+		const objs = this.zoneObjectUsers(z.name);
+		const conns = Object.values(this.model.connections).filter(c => objs.some(o => c.src == o.id || c.dest == o.id));
+		const fwds = uci.sections('firewall', 'forwarding').filter(f => f.src == z.name || f.dest == z.name);
+
+		const doDelete = () => {
+			for (const c of conns)
+				delete this.model.connections[c.id];
+			for (const o of objs) {
+				for (const g of Object.values(this.model.objects))
+					if (g.type == 'group') g.member = g.member.filter(m => m != o.id);
+				delete this.model.objects[o.id];
+			}
+			for (const f of fwds)
+				uci.remove('firewall', f['.name']);
+			uci.remove('firewall', sid);
+			ui.hideModal();
+			this.sel = null;
+			this.hideInfoCard();
+			this.markDirty();
+		};
+
+		ui.showModal(_('Delete zone'), [
+			E('p', [ _('Delete the zone "%s"?').format(z.name) ]),
+			fwm.toList(z.network).length ? E('p', [ _('Its networks (%s) will no longer belong to any zone, so traffic on them is no longer filtered by zone rules.').format(fwm.toList(z.network).join(', ')) ]) : '',
+			fwds.length ? E('p', [ _('%d zone forwarding(s) are removed.').format(fwds.length) ]) : '',
+			objs.length ? E('p', [ _('This also deletes %d desktop object(s) and %d connection(s) in this zone.').format(objs.length, conns.length) ]) : '',
+			E('div', { 'class': 'fwd-dialog-buttons' }, [
+				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': doDelete }, [ _('Delete') ])
+			])
+		]);
+	},
+
+	renderZones() {
+		const fwds = uci.sections('firewall', 'forwarding').filter(f => f.enabled != '0');
+		const pill = v => E('span', { 'class': 'fwd-pill ' + ({ ACCEPT: 'ACCEPT', REJECT: 'REJECT', DROP: 'DROP' }[String(v || 'DROP').toUpperCase()] || '') }, [ String(v || 'DROP').toLowerCase() ]);
+		const rows = uci.sections('firewall', 'zone').map(z => {
+			const objs = this.zoneObjectUsers(z.name), rules = this.zoneRuleUsers(z.name);
+			const to = fwds.filter(f => f.src == z.name).map(f => f.dest), from = fwds.filter(f => f.dest == z.name).map(f => f.src);
+			return E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td' }, [ E('strong', [ z.name || '?' ]), z.masq == '1' ? E('div', { 'class': 'fwd-tip-sub' }, [ _('masquerading') ]) : '' ]),
+				E('td', { 'class': 'td' }, [ fwm.toList(z.network).join(', ') || E('em', [ _('none') ]) ]),
+				E('td', { 'class': 'td' }, [ pill(z.input), ' ', pill(z.output), ' ', pill(z.forward) ]),
+				E('td', { 'class': 'td' }, [
+					to.length ? E('div', [ '→ ' + to.join(', ') ]) : '',
+					from.length ? E('div', [ '← ' + from.join(', ') ]) : '',
+					(!to.length && !from.length) ? '-' : ''
+				]),
+				E('td', { 'class': 'td' }, [
+					[ objs.length ? _('%d desktop object(s)').format(objs.length) : '', rules.length ? _('%d other rule(s)').format(rules.length) : '' ].filter(Boolean).join(', ') || '-'
+				]),
+				E('td', { 'class': 'td fwd-actions' }, [
+					this.smallBtn(_('Edit'), 'cbi-button-edit', () => this.editZone(z['.name'])),
+					this.smallBtn(_('Delete'), 'cbi-button-remove', () => this.deleteZone(z['.name']))
+				])
+			]);
+		});
+
+		dom.content(this.zonePane, [
+			E('p', { 'class': 'cbi-section-descr' }, [ _('Firewall zones group networks (interfaces). Policies apply to traffic no connection matches. Changes are written to /etc/config/firewall when you press Save & Apply.') ]),
+			this.table([ _('Zone'), _('Networks'), _('Input / Output / Forward'), _('Forwardings'), _('Used by'), '' ], rows, _('No zones.')),
+			E('div', { 'class': 'fwd-toolbar' }, [ this.smallBtn(_('+ New zone'), 'cbi-button-add', () => this.editZone(null)) ])
 		]);
 	},
 

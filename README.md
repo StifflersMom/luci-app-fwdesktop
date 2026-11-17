@@ -30,6 +30,9 @@ and `nat` sections.
   LuCI's rollback protection.
 - **Colours:** give any object its own symbol colour (RGB picker); stored in
   `/etc/config/fwdesktop`, never in the firewall configuration.
+- **Zone management:** create, edit, rename and delete firewall zones (policies,
+  masquerading, MSS clamping, covered networks, zone forwardings); renames
+  follow through to forwardings, rules and desktop objects.
 - **IP set management:** create, edit, rename and delete fw4 IP sets (entries,
   load file, timeout, counters) on the *IP sets* tab; renames follow through to
   desktop objects and rules.
