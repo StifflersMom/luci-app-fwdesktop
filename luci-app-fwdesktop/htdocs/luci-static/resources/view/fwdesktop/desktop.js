@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-23';
+const ASSET_REV = '1.0.0-24';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -2704,11 +2704,19 @@ return view.extend({
 	/* --- backup / restore of /etc/config/firewall + /etc/config/fwdesktop --- */
 
 	backupConfigs() {
-		return [ 'firewall', 'fwdesktop' ];
+		return [ 'firewall', 'fwdesktop', 'network' ];
+	},
+
+	/* of /etc/config/network only the routing part is backed up / restored */
+	ROUTING_TYPES: [ 'rule', 'rule6', 'route', 'route6' ],
+
+	partSections(conf) {
+		const all = uci.sections(conf);
+		return conf == 'network' ? all.filter(sec => this.ROUTING_TYPES.includes(sec['.type'])) : all;
 	},
 
 	exportConfig(conf) {
-		return uci.sections(conf).map(sec => {
+		return this.partSections(conf).map(sec => {
 			const out = { '.type': sec['.type'] };
 			if (sec['.anonymous'])
 				out['.anonymous'] = true;
@@ -2755,6 +2763,8 @@ return view.extend({
 			for (const sec of list) {
 				if (!sec || typeof sec['.type'] != 'string' || !nameRe.test(sec['.type']))
 					return _('Invalid section type in %s.').format(conf);
+				if (conf == 'network' && !this.ROUTING_TYPES.includes(sec['.type']))
+					return _('The network part of a backup may only contain routing rules and routes.');
 				if (!sec['.anonymous'] && !(typeof sec['.name'] == 'string' && nameRe.test(sec['.name'])))
 					return _('Invalid section name in %s.').format(conf);
 				for (const k in sec) {
@@ -2768,10 +2778,10 @@ return view.extend({
 		}
 
 		const fw = data.configs.firewall;
-		if (!Array.isArray(fw))
-			return _('The backup contains no firewall configuration.');
-		if (!fw.some(sec => sec['.type'] == 'defaults') || !fw.some(sec => sec['.type'] == 'zone'))
+		if (fw != null && (!fw.some(sec => sec['.type'] == 'defaults') || !fw.some(sec => sec['.type'] == 'zone')))
 			return _('The firewall configuration in the backup has no defaults or no zones; restoring it would leave the router unprotected.');
+		if (!this.backupConfigs().some(conf => Array.isArray(data.configs[conf])))
+			return _('The backup contains nothing to restore.');
 
 		return null;
 	},
@@ -2788,7 +2798,9 @@ return view.extend({
 			[ _('Includes'), count('firewall', 'include') ],
 			[ _('Desktop objects'), count('fwdesktop', 'object') ],
 			[ _('Connections'), count('fwdesktop', 'connection') ],
-			[ _('Custom services'), count('fwdesktop', 'service') ]
+			[ _('Custom services'), count('fwdesktop', 'service') ],
+			[ _('Routing rules'), count('network', 'rule') + count('network', 'rule6') ],
+			[ _('Static routes'), count('network', 'route') + count('network', 'route6') ]
 		];
 	},
 
@@ -2804,11 +2816,32 @@ return view.extend({
 		for (const conf of this.backupConfigs())
 			cur[conf] = this.exportConfig(conf);
 		const a = this.backupSummary(cur), b = this.backupSummary(data.configs);
-		const confs = this.backupConfigs().filter(conf => Array.isArray(data.configs[conf]));
+		const PARTS = {
+			firewall: [ _('Firewall'), _('/etc/config/firewall: zones, forwardings, rules, port forwards, NAT, IP sets') ],
+			fwdesktop: [ _('Desktop'), _('/etc/config/fwdesktop: objects, connections, services, layout, colours, settings') ],
+			network: [ _('Routing'), _('routing rules and static routes from /etc/config/network (interfaces are not touched)') ]
+		};
+		const boxes = {};
+		const parts = this.backupConfigs().map(conf => {
+			const have = Array.isArray(data.configs[conf]);
+			const cb = boxes[conf] = E('input', { 'type': 'checkbox', 'checked': have ? '' : null, 'disabled': have ? null : '' });
+			return E('label', { 'class': 'fwd-radio' + (have ? '' : ' disabled'), 'style': have ? null : 'opacity:.5' }, [
+				cb, E('span', [ E('strong', [ PARTS[conf][0] ]), E('div', { 'class': 'cbi-value-description' }, [ have ? PARTS[conf][1] : _('not in this backup') ]) ])
+			]);
+		});
+		const msg = E('div');
+		const go = () => {
+			const confs = this.backupConfigs().filter(conf => boxes[conf].checked);
+			if (!confs.length)
+				return dom.content(msg, E('p', { 'class': 'fwd-problem' }, [ _('Please choose at least one part to restore.') ]));
+			return this.restoreBackup(data, confs);
+		};
 
 		ui.showModal(_('Restore backup'), [
 			E('p', [ _('File: %s, created %s.').format(fileName, data.created ? new Date(data.created).toLocaleString() : '?') ]),
-			E('p', [ _('The following configurations are replaced completely: %s').format(confs.map(c => '/etc/config/' + c).join(', ')) ]),
+			E('h5', [ _('What should be restored?') ]),
+			E('div', parts),
+			E('p', { 'class': 'cbi-section-descr' }, [ _('Each chosen part is replaced completely. Firewall and desktop belong together: if you restore only one of them, the desktop rewrites its generated rules with the next change.') ]),
 			E('table', { 'class': 'table fwd-table' }, [
 				E('tr', { 'class': 'tr table-titles' }, [ E('th', { 'class': 'th' }, [ '' ]), E('th', { 'class': 'th' }, [ _('Now') ]), E('th', { 'class': 'th' }, [ _('Backup') ]) ])
 			].concat(a.map((row, i) => E('tr', { 'class': 'tr' + (row[1] != b[i][1] ? ' fwd-changed' : '') }, [
@@ -2817,8 +2850,9 @@ return view.extend({
 			E('p', [ _('The restore is applied with LuCI\'s rollback protection: if the router is no longer reachable afterwards, the previous configuration comes back automatically after a short time.') ]),
 			E('div', { 'class': 'fwd-dialog-buttons' }, [
 				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
-				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': ui.createHandlerFn(this, () => this.restoreBackup(data, confs)) }, [ _('Restore and apply') ])
-			])
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': ui.createHandlerFn(this, go) }, [ _('Restore and apply') ])
+			]),
+			msg
 		], 'cbi-modal');
 	},
 
@@ -2834,7 +2868,7 @@ return view.extend({
 		 * creates of the same names in one request.
 		 */
 		for (const conf of confs)
-			for (const sec of uci.sections(conf))
+			for (const sec of this.partSections(conf))
 				uci.remove(conf, sec['.name']);
 
 		return uci.save().then(() => {
@@ -2877,13 +2911,13 @@ return view.extend({
 		dom.content(this.backupPane, [
 			E('div', { 'class': 'cbi-section' }, [
 				E('h4', [ _('Download backup') ]),
-				E('p', [ _('Saves /etc/config/firewall (zones, forwardings, all rules and port forwards, IP sets) and /etc/config/fwdesktop (objects, connections, services, layout, colours) into one file.') ]),
+				E('p', [ _('Saves /etc/config/firewall (zones, forwardings, all rules and port forwards, IP sets), /etc/config/fwdesktop (objects, connections, services, layout, colours, settings) and the routing rules and static routes of /etc/config/network into one file.') ]),
 				this.dirty ? E('p', { 'class': 'fwd-problem' }, [ _('There are unsaved changes on this page; they are included in the backup. Press "Save & Apply" first if you want a backup of the active configuration.') ]) : '',
 				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.downloadBackup()) }, [ _('Download backup') ])
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h4', [ _('Restore backup') ]),
-				E('p', [ _('Replaces both configurations with the contents of a backup file. You see a summary before anything is changed, and the restore is applied with rollback protection.') ]),
+				E('p', [ _('Restores the parts you choose from a backup file. You see a summary before anything is changed, and the restore is applied with rollback protection.') ]),
 				fileInput,
 				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': () => fileInput.click() }, [ _('Choose backup file…') ])
 			]),

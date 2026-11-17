@@ -33,7 +33,7 @@ and `nat` sections.
   Save & Apply the conntrack entries of added, changed or removed rules are
   deleted, so established connections are checked against the new rules
   (or the whole table is flushed, if chosen).
-- **Backup / restore:** download `/etc/config/firewall` and `/etc/config/fwdesktop`
+- **Backup / restore:** download `/etc/config/firewall`, `/etc/config/fwdesktop` and the routing rules/routes
   as one JSON file and restore it with a preview; restores are applied with
   LuCI's rollback protection.
 - **Colours:** give any object its own symbol colour (RGB picker); stored in
