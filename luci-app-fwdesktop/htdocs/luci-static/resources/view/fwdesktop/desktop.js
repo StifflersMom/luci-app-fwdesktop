@@ -8,7 +8,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-19';
+const ASSET_REV = '1.0.0-20';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -183,6 +183,14 @@ return view.extend({
 
 		ui.tabs.initTabGroup(tabs.childNodes);
 
+		window.addEventListener('beforeunload', ev => {
+			if (this.dirty || this.stageTimer) {
+				this.stage();
+				ev.preventDefault();
+				ev.returnValue = '';
+			}
+		});
+
 		let wide = true;
 		try { wide = localStorage.getItem('fwdesktop.wide') != '0'; } catch (e) {}
 		this.setWide(wide);
@@ -224,8 +232,7 @@ return view.extend({
 				y: isWan ? 260 : 220 + (i++) * 110
 			};
 		}
-
-		this.dirty = true;
+		/* seeded objects are written together with the first real change */
 	},
 
 	updateBackground() {
@@ -241,9 +248,39 @@ return view.extend({
 		this.root.style.setProperty('--fwd-bg', bg || '#fff');
 	},
 
+	/*
+	 * Every change is staged into LuCI's pending changes shortly after it is
+	 * made (like LuCI forms do on "Save"), so it survives leaving the page.
+	 * "Save & Apply" then only has to apply.
+	 */
 	markDirty() {
 		this.dirty = true;
 		this.refresh();
+		this.scheduleStage();
+	},
+
+	scheduleStage() {
+		window.clearTimeout(this.stageTimer);
+		this.stageTimer = window.setTimeout(() => {
+			this.stageTimer = null;
+			this.stage().catch(e => ui.addNotification(null, E('p', [ _('Could not stage the changes: %s').format(e && e.message || e) ]), 'danger'));
+		}, 300);
+	},
+
+	/* serialised: each stage runs after the previous one finished */
+	stage() {
+		window.clearTimeout(this.stageTimer);
+		this.stageTimer = null;
+		this.stageChain = (this.stageChain || Promise.resolve()).catch(() => {}).then(() => {
+			this.dirty = false;
+			return this.writeUci();
+		}).then(() => {
+			this.staged = true;
+			this.renderStatus();
+			return ui.changes.init();
+		});
+		this.renderStatus();
+		return this.stageChain;
 	},
 
 	refresh() {
@@ -262,6 +299,10 @@ return view.extend({
 		this.renderBackup();
 		this.renderPreview();
 
+		this.renderStatus();
+	},
+
+	renderStatus() {
 		const n = this.gen.problems.length;
 		dom.content(this.statusEl, [
 			_('%d objects, %d connections, %d firewall sections').format(
@@ -269,7 +310,9 @@ return view.extend({
 				Object.keys(this.model.connections).length,
 				this.gen.sections.length),
 			n ? E('span', { 'class': 'fwd-problem', 'style': 'margin-left:1em' }, [ _('Problems: %d').format(n) ]) : '',
-			this.dirty ? E('em', { 'style': 'margin-left:1em' }, [ _('Unsaved changes, press "Save" or "Save & Apply"') ]) : ''
+			(this.dirty || this.stageTimer)
+				? E('em', { 'style': 'margin-left:1em' }, [ _('Saving changes…') ])
+				: this.staged ? E('em', { 'style': 'margin-left:1em' }, [ _('Changes are pending until you press "Save & Apply"') ]) : ''
 		]);
 	},
 
@@ -2315,6 +2358,9 @@ return view.extend({
 	},
 
 	restoreBackup(data, confs) {
+		window.clearTimeout(this.stageTimer);
+		this.stageTimer = null;
+		this.dirty = false;
 		ui.showModal(_('Restoring…'), [ E('p', { 'class': 'spinning' }, [ _('Writing the configuration…') ]) ]);
 
 		/*
@@ -2494,6 +2540,10 @@ return view.extend({
 	},
 
 	handleSave(ev) {
+		return this.stage().then(() => this.refresh());
+	},
+
+	writeUci() {
 		const owned = s => [ 'object', 'service', 'connection' ].includes(s['.type']);
 
 		if (!uci.get('fwdesktop', 'global'))
@@ -2533,14 +2583,19 @@ return view.extend({
 			}
 
 			return moved ? uci.save() : null;
-		}).then(() => {
-			this.dirty = false;
-			this.refresh();
-			return ui.changes.init();
 		});
 	},
 
+	/* discard pending (not yet applied) changes, like LuCI's "Revert" */
 	handleReset(ev) {
-		window.location.reload();
+		window.clearTimeout(this.stageTimer);
+		this.stageTimer = null;
+		ui.showModal(_('Discard changes'), [
+			E('p', [ _('Discard all changes that have not been applied yet? This reverts the pending changes of every LuCI page, not only this one.') ]),
+			E('div', { 'class': 'fwd-dialog-buttons' }, [
+				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': () => { ui.hideModal(); ui.changes.revert(); } }, [ _('Discard') ])
+			])
+		]);
 	}
 });
