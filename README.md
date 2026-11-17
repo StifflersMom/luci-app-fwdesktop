@@ -25,6 +25,10 @@ and `nat` sections.
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it
   to manage them in one dialog, merge connections that only differ in services.
+- **Reset affected connections on apply** (optional, *Settings* tab): after
+  Save & Apply the conntrack entries of added, changed or removed rules are
+  deleted, so established connections are checked against the new rules
+  (or the whole table is flushed, if chosen).
 - **Backup / restore:** download `/etc/config/firewall` and `/etc/config/fwdesktop`
   as one JSON file and restore it with a preview; restores are applied with
   LuCI's rollback protection.

@@ -2,13 +2,23 @@
 	"luci-app-fwdesktop": {
 		"description": "Grant access to the object based firewall desktop",
 		"read": {
+			"file": {
+				"/etc/config/firewall": [ "read" ]
+			},
 			"ubus": {
+				"file": [ "read" ],
 				"luci-rpc": [ "getHostHints" ],
 				"network.interface": [ "dump" ]
 			},
 			"uci": [ "firewall", "fwdesktop", "network" ]
 		},
 		"write": {
+			"file": {
+				"/usr/libexec/fwdesktop-ctreset": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			},
 			"uci": [ "firewall", "fwdesktop" ]
 		}
 	}

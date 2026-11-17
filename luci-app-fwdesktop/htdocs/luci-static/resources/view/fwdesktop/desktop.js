@@ -5,10 +5,11 @@
 'require uci';
 'require rpc';
 'require validation';
+'require fs';
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-20';
+const ASSET_REV = '1.0.0-21';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -156,6 +157,7 @@ return view.extend({
 		this.svcPane = E('div');
 		this.setPane = E('div');
 		this.backupPane = E('div');
+		this.settingsPane = E('div');
 		this.zonePane = E('div');
 		this.previewPane = E('div');
 
@@ -170,6 +172,7 @@ return view.extend({
 			E('div', { 'data-tab': 'zones', 'data-tab-title': _('Zones') }, [ this.zonePane ]),
 			E('div', { 'data-tab': 'ipsets', 'data-tab-title': _('IP sets') }, [ this.setPane ]),
 			E('div', { 'data-tab': 'backup', 'data-tab-title': _('Backup') }, [ this.backupPane ]),
+			E('div', { 'data-tab': 'settings', 'data-tab-title': _('Settings') }, [ this.settingsPane ]),
 			E('div', { 'data-tab': 'preview', 'data-tab-title': _('Generated rules') }, [ this.previewPane ])
 		]);
 
@@ -297,6 +300,7 @@ return view.extend({
 		this.renderSets();
 		this.renderZones();
 		this.renderBackup();
+		this.renderSettings();
 		this.renderPreview();
 
 		this.renderStatus();
@@ -2234,6 +2238,148 @@ return view.extend({
 				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': doDelete }, [ _('Delete') ])
 			])
 		]);
+	},
+
+	/* --- settings (stored in /etc/config/fwdesktop, section global) ----- */
+
+	setting(name) {
+		return uci.get('fwdesktop', 'global', name) || '';
+	},
+
+	setSetting(name, value) {
+		if (!uci.get('fwdesktop', 'global'))
+			uci.add('fwdesktop', 'global', 'global');
+		uci.set('fwdesktop', 'global', name, value || null);
+		this.markDirty();
+	},
+
+	renderSettings() {
+		const ct = this.setting('ct_reset');
+		const radio = (value, title, descr) => E('label', { 'class': 'fwd-radio' }, [
+			E('input', { 'type': 'radio', 'name': 'fwd-ct', 'value': value, 'checked': ct == value ? '' : null,
+				'change': () => this.setSetting('ct_reset', value) }),
+			E('span', [ E('strong', [ title ]), E('div', { 'class': 'cbi-value-description' }, [ descr ]) ])
+		]);
+
+		dom.content(this.settingsPane, [
+			E('div', { 'class': 'cbi-section' }, [
+				E('h4', [ _('Reset affected connections on apply') ]),
+				E('p', [ _('The firewall lets packets of established connections pass before any rule is checked, so a new block does not stop a connection that is already open. With this option, the matching connection tracking entries are deleted right after "Save & Apply" was confirmed; those connections are then checked against the new rules again.') ]),
+				radio('', _('Off'), _('Existing connections keep running until they end by themselves.')),
+				radio('targeted', _('Only affected connections (recommended)'),
+					_('Deletes entries matching the rules, port forwards and NAT rules that were added, changed or removed (by protocol, addresses and port). Changes without any address or port (e.g. "any" between whole zones) are skipped.')),
+				radio('all', _('All connections'),
+					_('Flushes the whole table when firewall rules changed. Every connection, including NATed internet traffic, has to reconnect.')),
+				E('p', { 'class': 'cbi-section-descr' }, [ _('Flows accelerated by flow offloading are removed together with their tracking entries. The result is logged on the router (logread -e fwdesktop).') ])
+			])
+		]);
+	},
+
+	/* minimal UCI file parser (for the applied /etc/config/firewall) */
+	parseUci(text) {
+		const out = [];
+		let cur = null;
+		const unq = v => {
+			v = v.trim();
+			if ((v.charAt(0) == "'" && v.slice(-1) == "'") || (v.charAt(0) == '"' && v.slice(-1) == '"'))
+				v = v.slice(1, -1);
+			return v.replace(/'\\''/g, "'");
+		};
+		for (const raw of String(text).split('\n')) {
+			const line = raw.trim();
+			let m;
+			if ((m = line.match(/^config\s+(\S+)(?:\s+(.+))?$/))) {
+				cur = { '.type': unq(m[1]), '.name': m[2] ? unq(m[2]) : null };
+				out.push(cur);
+			}
+			else if (cur && (m = line.match(/^option\s+(\S+)\s+(.+)$/))) {
+				cur[unq(m[1])] = unq(m[2]);
+			}
+			else if (cur && (m = line.match(/^list\s+(\S+)\s+(.+)$/))) {
+				const k = unq(m[1]);
+				(cur[k] = Array.isArray(cur[k]) ? cur[k] : []).push(unq(m[2]));
+			}
+		}
+		return out;
+	},
+
+	/* conntrack filters for one generated section; null = cannot be targeted */
+	ctFiltersFor(sec) {
+		const list = v => fwm.toList(v).length ? fwm.toList(v) : [ '' ];
+		const port = v => /^\d+$/.test(v) ? v : '';
+		const fam = sec.family == 'ipv4' ? '4' : sec.family == 'ipv6' ? '6' : '';
+		let protos = list(sec.proto || (sec['.type'] == 'nat' ? 'all' : 'tcp udp')).join(' ').split(/\s+/);
+		if (protos.includes('all') || protos.includes('any')) protos = [ '' ];
+		protos = protos.map(p => p == 'icmpv6' ? 'icmpv6' : p);
+
+		const srcs = list(sec.src_ip), dsts = sec['.type'] == 'redirect' ? [ '' ] : list(sec.dest_ip);
+		const ports = sec['.type'] == 'redirect' ? list(sec.src_dport) : sec['.type'] == 'nat' ? [ '' ] : list(sec.dest_port);
+		const out = [];
+		let broad = false;
+
+		for (const p of protos)
+			for (const sip of srcs)
+				for (const dip of dsts)
+					for (const dp of ports) {
+						const pp = (p == 'tcp' || p == 'udp') ? port(dp) : '';
+						if (!sip && !dip && !pp) { broad = true; continue; }
+						out.push([ 'p=' + p, 's=' + sip, 'd=' + dip, 'dp=' + pp, 'f=' + fam ].join(';'));
+					}
+
+		return { filters: out, broad: broad };
+	},
+
+	/* compare the applied firewall config with what will be applied now */
+	ctResetPlan() {
+		return L.resolveDefault(fs.read('/etc/config/firewall'), null).then(text => {
+			if (text == null)
+				return null;
+			const oldSecs = {}, newSecs = {};
+			for (const sec of this.parseUci(text))
+				if (sec['.name'] && fwm.isOwnedFirewallSection(sec)) oldSecs[sec['.name']] = sec;
+			for (const sec of fwm.generate(this.model).sections)
+				newSecs[sec['.name']] = sec;
+
+			const norm = sec => {
+				const o = {};
+				for (const k of Object.keys(sec).sort())
+					if (k != '.name' && k != 'name') o[k] = Array.isArray(sec[k]) ? sec[k].join(' ') : String(sec[k]);
+				return JSON.stringify(o);
+			};
+
+			const changed = [];
+			for (const n in oldSecs) if (!newSecs[n] || norm(oldSecs[n]) != norm(newSecs[n])) changed.push(oldSecs[n]);
+			for (const n in newSecs) if (!oldSecs[n] || norm(oldSecs[n]) != norm(newSecs[n])) changed.push(newSecs[n]);
+
+			let filters = [], broad = 0;
+			for (const sec of changed) {
+				const r = this.ctFiltersFor(sec);
+				filters = filters.concat(r.filters);
+				if (r.broad) broad++;
+			}
+			filters = filters.filter((f, i, l) => l.indexOf(f) == i).slice(0, 300);
+			return { changed: changed.length, filters: filters, broad: broad };
+		});
+	},
+
+	handleSaveApply(ev, mode) {
+		const ct = this.setting('ct_reset');
+		const planned = ct ? this.ctResetPlan() : Promise.resolve(null);
+
+		return planned.then(plan => this.handleSave(ev).then(() => {
+			if (plan && plan.changed) {
+				const args = (ct == 'all') ? [ 'flush' ] : plan.filters;
+				if (args.length) {
+					/* runs once LuCI confirmed the apply, before the page reloads */
+					const run = () => {
+						document.removeEventListener('uci-applied', run);
+						fs.exec('/usr/libexec/fwdesktop-ctreset', args).catch(() => {});
+					};
+					document.addEventListener('uci-applied', run);
+				}
+			}
+			ui.changes.apply(mode == '0');
+		}));
 	},
 
 	/* --- backup / restore of /etc/config/firewall + /etc/config/fwdesktop --- */

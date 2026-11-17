@@ -6,11 +6,11 @@ LUCI_TITLE:=Object based firewall desktop (fw4)
 LUCI_DESCRIPTION:=Visual, object based firewall editor. Define hosts, networks \
 	and services as objects, draw connections between them and let the app \
 	generate fw4 rules, port forwards and NAT.
-LUCI_DEPENDS:=+luci-base +luci-app-firewall +firewall4
+LUCI_DEPENDS:=+luci-base +luci-app-firewall +firewall4 +conntrack
 LUCI_PKGARCH:=all
 
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=20
+PKG_RELEASE:=21
 
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=Klaus <StifflersMom@users.noreply.github.com>

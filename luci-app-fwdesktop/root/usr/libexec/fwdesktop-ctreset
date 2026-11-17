@@ -1,0 +1,85 @@
+#!/bin/sh
+# Delete connection tracking entries so established flows are checked
+# against the new firewall rules (called by luci-app-fwdesktop after apply).
+#
+#   fwdesktop-ctreset flush
+#   fwdesktop-ctreset 'p=tcp;s=192.0.2.0/24;d=10.0.0.5;dp=22;f=4' ...
+#
+# p = protocol, s = source address/network, d = destination address,
+# dp = original destination port, f = 4 or 6 (optional).
+# Every value is validated; unknown or malformed filters are skipped.
+
+log() { logger -t fwdesktop "$*"; }
+
+if [ "$1" = "flush" ]; then
+	if command -v conntrack >/dev/null 2>&1; then
+		conntrack -F >/dev/null 2>&1
+		conntrack -F -f ipv6 >/dev/null 2>&1
+	else
+		echo f > /proc/net/nf_conntrack
+	fi
+	log "flushed connection tracking table"
+	echo "flushed"
+	exit 0
+fi
+
+command -v conntrack >/dev/null 2>&1 || { echo "conntrack tool not installed" >&2; exit 2; }
+
+is_ip()    { echo "$1" | grep -qE '^[0-9a-fA-F:.]+(/[0-9]{1,3})?$'; }
+is_port()  { echo "$1" | grep -qE '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+is_proto() { echo "$1" | grep -qE '^[a-z0-9-]{1,16}$'; }
+
+# address argument for -s/-d (with --mask-* for IPv4 networks)
+addr_args() {   # $1 = s|d  $2 = address
+	local opt=src a=$2
+	[ "$1" = d ] && opt=dst
+	case "$a" in
+	*:*/128) echo "-$1 ${a%/*}" ;;
+	*:*/*)   echo "" ;;                       # IPv6 network: no mask support, match broader
+	*:*)     echo "-$1 $a" ;;
+	*/32)    echo "-$1 ${a%/*}" ;;
+	*/*)     eval "$(/bin/ipcalc.sh "$a" 2>/dev/null)"
+	         [ -n "$NETMASK" ] && echo "-$1 ${a%/*} --mask-$opt $NETMASK" ;;
+	*)       echo "-$1 $a" ;;
+	esac
+}
+
+total=0
+for spec in "$@"; do
+	p= s= d= dp= f=
+	for kv in $(echo "$spec" | tr ';' ' '); do
+		case "$kv" in
+		p=*)  p=${kv#p=} ;;
+		s=*)  s=${kv#s=} ;;
+		d=*)  d=${kv#d=} ;;
+		dp=*) dp=${kv#dp=} ;;
+		f=*)  f=${kv#f=} ;;
+		esac
+	done
+
+	{ [ -z "$p" ] || is_proto "$p"; } && { [ -z "$s" ] || is_ip "$s"; } && \
+	{ [ -z "$d" ] || is_ip "$d"; } && { [ -z "$dp" ] || is_port "$dp"; } && \
+	{ [ -z "$f" ] || [ "$f" = 4 ] || [ "$f" = 6 ]; } || { log "skipped invalid filter: $spec"; continue; }
+
+	# never run an unrestricted delete from a filter
+	[ -n "$s$d$dp" ] || { log "skipped unrestricted filter: $spec"; continue; }
+
+	args=""
+	[ -n "$p" ] && args="$args -p $p"
+	[ -n "$s" ] && args="$args $(addr_args s "$s")"
+	[ -n "$d" ] && args="$args $(addr_args d "$d")"
+	[ -n "$dp" ] && [ -n "$p" ] && args="$args --dport $dp"
+
+	fams="ipv4 ipv6"
+	case "$s$d" in *:*) fams=ipv6 ;; *.*) fams=ipv4 ;; esac
+	[ "$f" = 4 ] && fams=ipv4
+	[ "$f" = 6 ] && fams=ipv6
+
+	for fam in $fams; do
+		n=$(conntrack -D -f $fam $args 2>&1 >/dev/null | sed -n 's/.* \([0-9][0-9]*\) flow entries.*/\1/p')
+		total=$((total + ${n:-0}))
+	done
+done
+
+log "deleted $total connection tracking entries"
+echo "deleted $total"
