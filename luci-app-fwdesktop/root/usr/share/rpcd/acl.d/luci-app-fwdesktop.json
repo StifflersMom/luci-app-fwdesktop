@@ -42,13 +42,17 @@
 		},
 		"write": {
 			"file": {
+				"/etc/iproute2/rt_tables": [
+					"write"
+				],
 				"/usr/libexec/fwdesktop-ctreset": [
 					"exec"
 				]
 			},
 			"ubus": {
 				"file": [
-					"exec"
+					"exec",
+					"write"
 				]
 			},
 			"uci": [

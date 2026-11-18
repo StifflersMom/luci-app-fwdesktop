@@ -9,7 +9,9 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-24';
+const ASSET_REV = '1.0.0-25';
+
+const RT_TABLES = '/etc/iproute2/rt_tables';
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -125,7 +127,7 @@ return view.extend({
 			uci.load([ 'fwdesktop', 'firewall', 'network' ]),
 			L.resolveDefault(callHostHints(), {}),
 			L.resolveDefault(callNetworkDump(), []),
-			L.resolveDefault(fs.read('/etc/iproute2/rt_tables'), '')
+			L.resolveDefault(fs.read(RT_TABLES), '')
 		]);
 	},
 
@@ -135,6 +137,8 @@ return view.extend({
 		this.hints = data[1] || {};
 		this.ifaces = data[2] || [];
 		this.rtTables = this.parseRtTables(data[3] || '');
+		this.rtAll = this.parseRtAll(data[3] || '');
+		this.rtPending = {};
 		this.zones = uci.sections('firewall', 'zone').map(z => z.name).filter(Boolean);
 		this.model = fwm.fromSections(uci.sections('fwdesktop'));
 		this.pan = { x: 40, y: 30, k: 1 };
@@ -281,7 +285,7 @@ return view.extend({
 		this.stageChain = (this.stageChain || Promise.resolve()).catch(() => {}).then(() => {
 			this.dirty = false;
 			return this.writeUci();
-		}).then(() => {
+		}).then(() => this.ensureRtTables()).then(() => {
 			this.staged = true;
 			this.renderStatus();
 			return ui.changes.init();
@@ -2247,14 +2251,120 @@ return view.extend({
 
 	/* --- policy routing: network rule/rule6 and route/route6 sections ---- */
 
-	parseRtTables(text) {
+	/* all name -> number entries of rt_tables, reserved ones included */
+	parseRtAll(text) {
 		const t = {};
 		for (const line of String(text).split('\n')) {
 			const m = line.trim().match(/^(\d+)\s+(\S+)/);
-			if (m && !/^(0|253|254|255)$/.test(m[1]))
-				t[m[2]] = m[1];
+			if (m) t[m[2]] = m[1];
 		}
 		return t;
+	},
+
+	/* the user's own named tables (no reserved numbers) */
+	parseRtTables(text) {
+		const all = this.parseRtAll(text), t = {};
+		for (const name in all)
+			if (!/^(0|128|253|254|255)$/.test(all[name]))
+				t[name] = all[name];
+		return t;
+	},
+
+	/* table value that netifd can resolve without an rt_tables entry */
+	isBuiltinTable(t) {
+		return !t || /^\d+$/.test(t) || [ 'main', 'local', 'default' ].includes(t);
+	},
+
+	/* names used by routing rules/routes that rt_tables does not know (yet) */
+	unresolvedTables() {
+		const out = [];
+		for (const s of uci.sections('network')) {
+			const t = (s['.type'] == 'rule' || s['.type'] == 'rule6') ? s.lookup
+				: (s['.type'] == 'route' || s['.type'] == 'route6') ? s.table : null;
+			if (t && !this.isBuiltinTable(t) && !this.rtAll[t] && !out.includes(t))
+				out.push(t);
+		}
+		return out;
+	},
+
+	/* numbers that are taken: rt_tables entries, numeric tables in use, pending names */
+	takenTableNumbers(except) {
+		const taken = {};
+		for (const name in this.rtAll) taken[this.rtAll[name]] = true;
+		for (const s of uci.sections('network'))
+			for (const t of [ s.lookup, s.table ])
+				if (t && /^\d+$/.test(t)) taken[+t] = true;
+		for (const name in this.rtPending)
+			if (name != except) taken[this.rtPending[name]] = true;
+		return taken;
+	},
+
+	/* free table number for a new name; own tables usually start at 100 */
+	freeTableNumber(taken) {
+		for (let n = 100; n <= 252; n++) if (!taken[n]) return n;
+		for (let n = 1; n < 100; n++) if (!taken[n]) return n;
+		return null;
+	},
+
+	/* number a new name gets on save: the one chosen in the editor, else the next free one */
+	pendingTableNumbers() {
+		const res = {};
+		const taken = this.takenTableNumbers();
+		for (const name of this.unresolvedTables()) {
+			let n = this.rtPending[name];
+			if (!n) {
+				n = this.freeTableNumber(taken);
+				if (!n) continue;
+				taken[n] = true;
+			}
+			res[name] = n;
+		}
+		return res;
+	},
+
+	/*
+	 * Appends names to /etc/iproute2/rt_tables. The file is read again first,
+	 * so edits made elsewhere are kept; a name that exists meanwhile is left
+	 * alone, a number that is taken meanwhile is replaced by a free one.
+	 */
+	addRtTables(wanted) {
+		if (!Object.keys(wanted).length)
+			return Promise.resolve();
+		return L.resolveDefault(fs.read(RT_TABLES), '').then(text => {
+			const all = this.parseRtAll(text);
+			const taken = {};
+			for (const name in all) taken[all[name]] = true;
+			const lines = [];
+			for (const name in wanted) {
+				if (all[name]) continue;
+				let n = +wanted[name];
+				if (!(n >= 1 && n <= 252) || taken[n]) n = this.freeTableNumber(taken);
+				if (!n) continue;
+				taken[n] = true;
+				all[name] = String(n);
+				lines.push(n + '\t' + name);
+			}
+			if (!lines.length)
+				return;
+			const head = text && !/\n$/.test(text) ? text + '\n' : (text || '');
+			return fs.write(RT_TABLES, head + '# added by Firewall Desktop\n' + lines.join('\n') + '\n').then(() => {
+				this.rtAll = all;
+				this.rtTables = this.parseRtTables(head + lines.join('\n'));
+			});
+		});
+	},
+
+	/* runs with every stage, so the names exist before any apply (also one from another page) */
+	ensureRtTables() {
+		const wanted = this.pendingTableNumbers();
+		if (!Object.keys(wanted).length)
+			return Promise.resolve();
+		return this.addRtTables(wanted).then(() => {
+			this.rtPending = {};
+			this.renderRouting();
+		}).catch(e => {
+			ui.addNotification(null, E('p', [ _('Could not add the routing table names %s to %s: %s').format(Object.keys(wanted).join(', '), RT_TABLES, e && e.message || e) ]), 'danger');
+		});
 	},
 
 	tableChoices(withMain) {
@@ -2264,10 +2374,59 @@ return view.extend({
 		c.local = 'local (255)';
 		for (const name in this.rtTables)
 			c[name] = '%s (%s)'.format(name, this.rtTables[name]);
+		const pending = this.pendingTableNumbers();
+		for (const name in pending)
+			c[name] = _('%s (new, %s)').format(name, pending[name]);
 		const used = uci.sections('network').map(s => s.lookup || s.table).filter(Boolean);
 		for (const t of used)
 			if (!c[t]) c[t] = t;
 		return c;
+	},
+
+	/*
+	 * "Table number" row for the rule and route editors: shown when the
+	 * chosen table is a name rt_tables does not know yet.
+	 */
+	newTableField(wTable) {
+		const wNum = new ui.Textfield('', { optional: true, datatype: 'range(1,252)' });
+		const descr = E('div', { 'class': 'cbi-value-description' });
+		const row = E('div', { 'class': 'fwd-row', 'data-name': 'tnum' }, [
+			E('label', {}, [ _('Table number') ]),
+			E('div', { 'class': 'fwd-field' }, [ wNum.render(), descr ])
+		]);
+		const name = () => fwm.toList(wTable.getValue())[0] || '';
+		const isNew = () => {
+			const t = name();
+			return /^[A-Za-z0-9_.-]+$/.test(t) && !this.isBuiltinTable(t) && !this.rtAll[t];
+		};
+		let shown = null;
+		const update = () => {
+			const t = name();
+			row.classList.toggle('hidden', !isNew());
+			if (!isNew() || shown == t) return;
+			shown = t;
+			const n = this.rtPending[t] || this.pendingTableNumbers()[t] || this.freeTableNumber(this.takenTableNumbers(t));
+			wNum.setValue(n ? String(n) : '');
+			dom.content(descr, _('"%s" is not in %s yet. It is added there with this number when you save this dialog, so netifd can resolve the name.').format(t, RT_TABLES));
+		};
+		return {
+			row: row,
+			update: update,
+			/* returns an error message or null */
+			validate: () => {
+				if (!isNew()) return null;
+				wNum.triggerValidation();
+				const n = +(wNum.getValue() || '').trim();
+				if (!wNum.isValid() || !n) return _('Please enter a table number from 1 to 252.');
+				/* numeric tables in use are no conflict: the name may label such a table */
+				const owner = Object.keys(this.rtAll).find(k => this.rtAll[k] == String(n))
+					|| Object.keys(this.rtPending).find(k => k != name() && this.rtPending[k] == n);
+				if (owner)
+					return _('Table number %d is already used by "%s".').format(n, owner);
+				return null;
+			},
+			commit: () => { if (isNew()) this.rtPending[name()] = +(wNum.getValue() || '').trim(); }
+		};
 	},
 
 	ifaceChoices(optional) {
@@ -2322,6 +2481,7 @@ return view.extend({
 		const wInvert = new ui.Checkbox(cur.invert == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
 		const wMode = new ui.Select(mode, ACTIONS_R, { optional: false, sort: false });
 		const wTable = new ui.Dropdown(cur.lookup || '', this.tableChoices(false), { optional: true, create: true, sort: false, placeholder: _('table name or number') });
+		const tnum = this.newTableField(wTable);
 		const wGoto = new ui.Textfield(cur.goto || '', { optional: true, datatype: 'range(1,32765)' });
 		const wSup = new ui.Textfield(cur.suppress_prefixlength || '', { optional: true, datatype: 'range(0,128)', placeholder: _('e.g. 0 = ignore default routes') });
 		const wEnabled = new ui.Checkbox(cur.disabled == '1' ? '0' : '1', { value_enabled: '1', value_disabled: '0' });
@@ -2347,7 +2507,8 @@ return view.extend({
 			this.formRow(_('Invert match'), wInvert),
 			E('h5', [ _('Action') ]),
 			this.formRow(_('Action'), wMode),
-			this.formRow(_('Routing table'), wTable, _('Name from /etc/iproute2/rt_tables or a number (1-252 for own tables).'), 'table'),
+			this.formRow(_('Routing table'), wTable, _('Name from /etc/iproute2/rt_tables or a number (1-252 for own tables). A new name is added to rt_tables.'), 'table'),
+			tnum.row,
 			this.formRow(_('Go to priority'), wGoto, null, 'goto'),
 			this.formRow(_('Suppress prefix length'), wSup, _('Ignore routes in the table with this prefix length or shorter.'), 'sup'),
 			errors
@@ -2358,6 +2519,8 @@ return view.extend({
 			const m = wMode.getValue(), pr = wProto.getValue();
 			this.showRow(form, 'table', m == 'lookup');
 			this.showRow(form, 'sup', m == 'lookup');
+			tnum.update();
+			if (m != 'lookup') this.showRow(form, 'tnum', false);
 			this.showRow(form, 'goto', m == 'goto');
 			this.showRow(form, 'dport', pr == 'tcp' || pr == 'udp');
 			this.showRow(form, 'sport', pr == 'tcp' || pr == 'udp');
@@ -2382,6 +2545,8 @@ return view.extend({
 			const m = wMode.getValue();
 			const table = fwm.toList(wTable.getValue())[0] || '';
 			if (m == 'lookup' && !/^[A-Za-z0-9_.-]+$/.test(table)) msgs.push(_('Please choose a routing table.'));
+			const tnumErr = m == 'lookup' ? tnum.validate() : null;
+			if (tnumErr) msgs.push(tnumErr);
 			if (m == 'goto' && !v(wGoto)) msgs.push(_('Please enter the priority to go to.'));
 			if (msgs.length)
 				return dom.content(errors, msgs.map(x => E('div', { 'class': 'fwd-problem' }, [ x ])));
@@ -2395,6 +2560,7 @@ return view.extend({
 			set('mark', v(wMark)); set('tos', v(wTos)); set('uidrange', v(wUid));
 			set('invert', wInvert.getValue() == '1' ? '1' : '');
 			set('lookup', m == 'lookup' ? table : '');
+			if (m == 'lookup') tnum.commit();
 			set('suppress_prefixlength', m == 'lookup' ? v(wSup) : '');
 			set('goto', m == 'goto' ? v(wGoto) : '');
 			set('action', (m != 'lookup' && m != 'goto') ? m : '');
@@ -2426,6 +2592,7 @@ return view.extend({
 		const wTarget = new ui.Textfield(target, { optional: false, placeholder: fam == 'ipv6' ? '::/0' : '0.0.0.0/0' });
 		const wGw = new ui.Textfield(cur.gateway || '', { optional: true, placeholder: fam == 'ipv6' ? 'fe80::1' : '192.168.178.1' });
 		const wTable = new ui.Dropdown(cur.table || '', this.tableChoices(true), { optional: true, create: true, sort: false });
+		const tnum = this.newTableField(wTable);
 		const wMetric = new ui.Textfield(cur.metric || '', { optional: true, datatype: 'uinteger' });
 		const wMtu = new ui.Textfield(cur.mtu || '', { optional: true, datatype: 'range(64,9000)' });
 		const wSource = new ui.Textfield(cur.source || '', { optional: true, placeholder: _('preferred source address') });
@@ -2442,7 +2609,8 @@ return view.extend({
 			this.formRow(_('Interface'), wIface),
 			this.formRow(_('Target'), wTarget, _('Network in CIDR notation; 0.0.0.0/0 (IPv4) or ::/0 (IPv6) is a default route.')),
 			this.formRow(_('Gateway'), wGw),
-			this.formRow(_('Routing table'), wTable, _('Leave on "main" for normal routes; choose your own table for source routing.')),
+			this.formRow(_('Routing table'), wTable, _('Leave on "main" for normal routes; choose your own table for source routing. A new name is added to rt_tables.')),
+			tnum.row,
 			this.formRow(_('Metric'), wMetric),
 			this.formRow(_('MTU'), wMtu),
 			this.formRow(_('Source address'), wSource),
@@ -2450,7 +2618,7 @@ return view.extend({
 			this.formRow(_('On-link'), wOnlink, _('Gateway is reachable on the link even if outside the interface subnet.')),
 			errors
 		]);
-		form.addEventListener('widget-change', () => { fam = wFam.getValue(); });
+		form.addEventListener('widget-change', () => { fam = wFam.getValue(); tnum.update(); });
 
 		const save = () => {
 			const v = w => (w.getValue() || '').toString().trim();
@@ -2470,6 +2638,8 @@ return view.extend({
 			if (!wMetric.isValid() || !wMtu.isValid()) msgs.push(_('Please correct the highlighted fields.'));
 			const table = fwm.toList(wTable.getValue())[0] || '';
 			if (table && !/^[A-Za-z0-9_.-]+$/.test(table)) msgs.push(_('Invalid routing table.'));
+			const tnumErr = tnum.validate();
+			if (tnumErr) msgs.push(tnumErr);
 			if (msgs.length)
 				return dom.content(errors, msgs.map(x => E('div', { 'class': 'fwd-problem' }, [ x ])));
 
@@ -2477,6 +2647,7 @@ return view.extend({
 			const set = (k, val) => uci.set('network', id, k, val ? val : null);
 			set('interface', v(wIface)); set('target', v(wTarget)); set('netmask', '');
 			set('gateway', v(wGw)); set('table', table == 'main' ? '' : table);
+			tnum.commit();
 			set('metric', v(wMetric)); set('mtu', v(wMtu)); set('source', v(wSource));
 			set('type', v(wType)); set('onlink', wOnlink.getValue() == '1' ? '1' : '');
 			set('disabled', wEnabled.getValue() == '1' ? '' : '1');
@@ -2489,6 +2660,7 @@ return view.extend({
 			form,
 			this.dialogButtons(isNew ? null : () => { uci.remove('network', sid); ui.hideModal(); this.markDirty(); }, save)
 		], 'cbi-modal');
+		tnum.update();
 	},
 
 	showLiveRouting(box) {
@@ -2538,7 +2710,15 @@ return view.extend({
 		]));
 
 		const live = E('div');
+		const pending = this.pendingTableNumbers();
+		const unres = this.unresolvedTables().filter(t => !pending[t]);
 		dom.content(this.routePane, [
+			Object.keys(pending).length ? E('div', { 'class': 'alert-message notice' }, [
+				_('New routing table names, not yet in %s (added on the next save): %s').format(RT_TABLES, Object.keys(pending).map(t => '%s = %s'.format(t, pending[t])).join(', '))
+			]) : '',
+			unres.length ? E('div', { 'class': 'alert-message warning' }, [
+				_('No free table number left for: %s. netifd ignores rules and routes with these tables.').format(unres.join(', '))
+			]) : '',
 			E('p', { 'class': 'cbi-section-descr' }, [ _('Policy routing (source routing): rules decide which routing table a packet uses, e.g. "traffic from 192.168.179.0/24 uses table dsl", and the table holds the routes, e.g. a default route via the DSL uplink. Stored in /etc/config/network and applied with Save & Apply (with rollback protection).') ]),
 			E('h4', [ _('Routing rules') ]),
 			this.table([ _('On'), _('Priority'), _('Family'), _('Match / comment'), _('Action'), '' ], ruleRows, _('No routing rules.')),
@@ -2555,7 +2735,7 @@ return view.extend({
 			E('h4', [ _('Active state') ]),
 			E('div', { 'class': 'fwd-toolbar' }, [ this.smallBtn(_('Show active rules and routes'), '', () => this.showLiveRouting(live)) ]),
 			live,
-			Object.keys(this.rtTables).length ? '' : E('p', { 'class': 'cbi-section-descr' }, [ _('No named routing tables in /etc/iproute2/rt_tables; use table numbers (1-252) or add names there.') ])
+			Object.keys(this.rtTables).length || Object.keys(pending).length ? '' : E('p', { 'class': 'cbi-section-descr' }, [ _('No named routing tables in /etc/iproute2/rt_tables yet. Use a table number (1-252), or type a new name in the rule or route editor and it is added there.') ])
 		]);
 	},
 
@@ -2729,6 +2909,16 @@ return view.extend({
 		});
 	},
 
+	/* rt_tables entries (name -> number) of the tables the routing part uses */
+	usedRtTables() {
+		const res = {};
+		for (const s of this.partSections('network'))
+			for (const t of [ s.lookup, s.table ])
+				if (t && !this.isBuiltinTable(t) && this.rtAll[t])
+					res[t] = this.rtAll[t];
+		return res;
+	},
+
 	downloadBackup() {
 		const data = {
 			format: 'luci-app-fwdesktop-backup',
@@ -2739,6 +2929,7 @@ return view.extend({
 		};
 		for (const conf of this.backupConfigs())
 			data.configs[conf] = this.exportConfig(conf);
+		data.rt_tables = this.usedRtTables();
 
 		const blob = new Blob([ JSON.stringify(data, null, '\t') + '\n' ], { type: 'application/json' });
 		const stamp = data.created.replace(/[:T]/g, '-').replace(/\..*$/, '');
@@ -2776,6 +2967,11 @@ return view.extend({
 				}
 			}
 		}
+
+		const rt = data.rt_tables;
+		if (rt != null && (typeof rt != 'object' || Array.isArray(rt) ||
+		    Object.keys(rt).some(k => !/^[A-Za-z0-9_.-]+$/.test(k) || /^\d+$/.test(k) || !/^\d+$/.test(String(rt[k])) || +rt[k] < 1 || +rt[k] > 252)))
+			return _('Invalid routing table names in the backup.');
 
 		const fw = data.configs.firewall;
 		if (fw != null && (!fw.some(sec => sec['.type'] == 'defaults') || !fw.some(sec => sec['.type'] == 'zone')))
@@ -2819,7 +3015,7 @@ return view.extend({
 		const PARTS = {
 			firewall: [ _('Firewall'), _('/etc/config/firewall: zones, forwardings, rules, port forwards, NAT, IP sets') ],
 			fwdesktop: [ _('Desktop'), _('/etc/config/fwdesktop: objects, connections, services, layout, colours, settings') ],
-			network: [ _('Routing'), _('routing rules and static routes from /etc/config/network (interfaces are not touched)') ]
+			network: [ _('Routing'), _('routing rules and static routes from /etc/config/network (interfaces are not touched), plus their table names in /etc/iproute2/rt_tables') ]
 		};
 		const boxes = {};
 		const parts = this.backupConfigs().map(conf => {
@@ -2882,6 +3078,10 @@ return view.extend({
 			}
 			return uci.save();
 		}).then(() => {
+			/* missing table names first, so netifd can resolve the restored rules */
+			if (confs.includes('network') && data.rt_tables)
+				return this.addRtTables(data.rt_tables);
+		}).then(() => {
 			this.dirty = false;
 			ui.hideModal();
 			/* standard apply with rollback; the page reloads afterwards */
@@ -2911,7 +3111,7 @@ return view.extend({
 		dom.content(this.backupPane, [
 			E('div', { 'class': 'cbi-section' }, [
 				E('h4', [ _('Download backup') ]),
-				E('p', [ _('Saves /etc/config/firewall (zones, forwardings, all rules and port forwards, IP sets), /etc/config/fwdesktop (objects, connections, services, layout, colours, settings) and the routing rules and static routes of /etc/config/network into one file.') ]),
+				E('p', [ _('Saves /etc/config/firewall (zones, forwardings, all rules and port forwards, IP sets), /etc/config/fwdesktop (objects, connections, services, layout, colours, settings) and the routing rules and static routes of /etc/config/network with their table names from /etc/iproute2/rt_tables into one file.') ]),
 				this.dirty ? E('p', { 'class': 'fwd-problem' }, [ _('There are unsaved changes on this page; they are included in the backup. Press "Save & Apply" first if you want a backup of the active configuration.') ]) : '',
 				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.downloadBackup()) }, [ _('Download backup') ])
 			]),
