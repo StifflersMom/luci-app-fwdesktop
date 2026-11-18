@@ -31,6 +31,8 @@
  *       option src     '<object id>'
  *       option dest    '<object id>'
  *       list   service '<service id>'
+ *       option bidir   '1'               (traffic is also allowed from dest to src ...)
+ *       list   service_rev '<service id>' (... with these services; empty = any)
  *       option action  'ACCEPT' | 'REJECT' | 'DROP'
  *       option nat     'none' | 'masq' | 'dnat'
  *       option ext_port '8080'            (dnat: public port)
@@ -39,6 +41,9 @@
  *       option log     '0' | '1'
  *       option enabled '0' | '1'
  *       option label / option comment
+ *
+ * Action, family, options, log and state apply to both directions of a
+ * bidirectional connection; NAT and port forwarding only to src -> dest.
  *
  * Generated firewall sections are named "fwd_<connection id>_<r|d|n><n>" so they
  * can be told apart from hand written ones and replaced as a whole.
@@ -166,6 +171,8 @@ function fromSections(sections) {
 				src: s.src,
 				dest: s.dest,
 				service: toList(s.service),
+				bidir: s.bidir == '1',
+				service_rev: toList(s.service_rev),
 				action: ACTIONS.includes(s.action) ? s.action : 'ACCEPT',
 				nat: [ 'masq', 'dnat' ].includes(s.nat) ? s.nat : 'none',
 				ext_port: s.ext_port || '',
@@ -235,6 +242,8 @@ function toSections(model) {
 			src: c.src,
 			dest: c.dest,
 			service: c.service,
+			bidir: c.bidir ? '1' : null,
+			service_rev: c.bidir ? c.service_rev : null,
 			action: c.action,
 			nat: c.nat != 'none' ? c.nat : null,
 			ext_port: c.nat == 'dnat' ? c.ext_port : null,
@@ -531,109 +540,135 @@ function generate(model) {
 			return sec;
 		};
 
-		for (const s of srcEps) {
-			for (const d of dstEps) {
-				if (s.router && d.router) {
-					problems.push({ conn: cid, msg: 'A connection from the router to itself has no effect' });
-					continue;
-				}
-
-				if (s.ipset && d.ipset) {
-					problems.push({ conn: cid, msg: 'A firewall rule can match only one IP set; use an address object on one side' });
-					continue;
-				}
-				const setMatch = s.ipset ? s.ipset + ' src' : (d.ipset ? d.ipset + ' dest' : null);
-
-				const sf = familyOf(s.addrs), df = familyOf(d.addrs);
-				if (sf && df && sf != 'mixed' && df != 'mixed' && sf != df) {
-					problems.push({ conn: cid, msg: 'Source and destination use different IP families' });
-					continue;
-				}
-				if (c.family && ((sf && sf != 'mixed' && sf != c.family) || (df && df != 'mixed' && df != c.family))) {
-					problems.push({ conn: cid, msg: 'Addresses do not match the selected IP family' });
-					continue;
-				}
-
-				for (const b of buckets) {
-					if (c.nat == 'dnat') {
-						const ports = b.ports;
-						if (extPorts.length && extPorts.length != ports.length) {
-							problems.push({ conn: cid, msg: 'Number of public ports must match the number of service ports' });
-							break;
-						}
-						/* fw4 redirects take a single src_ip, so emit one redirect per source address */
-						const srcIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
-						if (!srcIps.length) {
-							problems.push({ conn: cid, msg: 'Port forwarding is IPv4 only, but the source has only IPv6 addresses' });
-							break;
-						}
-						ports.forEach((p, i) => srcIps.forEach(ip => {
-							sections.push(withExtra(compact({
-								'.type': 'redirect',
-								'.name': base + 'd' + (n++),
-								name: title + ' (' + (extPorts[i] || p) + ')' + (srcIps.length > 1 ? ' ' + ip : ''),
-								target: 'DNAT',
-								family: 'ipv4',
-								src: s.zone,
-								src_ip: ip,
-								ipset: setMatch,
-								src_dport: extPorts[i] || p,
-								dest: d.zone,
-								dest_ip: d.addrs[0],
-								dest_port: p,
-								proto: b.proto,
-								log: c.log ? '1' : null
-							})));
-						}));
+		const emit = (srcEps, dstEps, bks, nat, ttl) => {
+			for (const s of srcEps) {
+				for (const d of dstEps) {
+					if (s.router && d.router) {
+						problems.push({ conn: cid, msg: 'A connection from the router to itself has no effect' });
 						continue;
 					}
 
-					const rule = {
-						'.type': 'rule',
-						'.name': base + 'r' + (n++),
-						name: title,
-						src: s.router ? null : s.zone,
-						dest: d.router ? null : d.zone,
-						src_ip: s.addrs,
-						dest_ip: d.addrs,
-						ipset: setMatch,
-						proto: b.proto,
-						dest_port: b.ports,
-						icmp_type: b.icmp,
-						target: c.action,
-						family: c.family || null,
-						log: c.log ? '1' : null
-					};
+					if (s.ipset && d.ipset) {
+						problems.push({ conn: cid, msg: 'A firewall rule can match only one IP set; use an address object on one side' });
+						continue;
+					}
+					const setMatch = s.ipset ? s.ipset + ' src' : (d.ipset ? d.ipset + ' dest' : null);
 
-					if (b.proto == 'icmp' && (c.family == 'ipv6' || sf == 'ipv6' || df == 'ipv6'))
-						rule.proto = 'icmpv6';
+					const sf = familyOf(s.addrs), df = familyOf(d.addrs);
+					if (sf && df && sf != 'mixed' && df != 'mixed' && sf != df) {
+						problems.push({ conn: cid, msg: 'Source and destination use different IP families' });
+						continue;
+					}
+					if (c.family && ((sf && sf != 'mixed' && sf != c.family) || (df && df != 'mixed' && df != c.family))) {
+						problems.push({ conn: cid, msg: 'Addresses do not match the selected IP family' });
+						continue;
+					}
 
-					sections.push(withExtra(compact(rule)));
-				}
-
-				if (c.nat == 'masq' && c.action == 'ACCEPT' && c.family != 'ipv6') {
-					/* fw4 nat sections take a single src_ip / dest_ip each */
-					const sIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
-					const dIps = d.addrs ? d.addrs.filter(a => !isIPv6(a)) : [ null ];
-					for (const sip of sIps)
-						for (const dip of dIps)
-							sections.push(compact({
-								'.type': 'nat',
-								'.name': base + 'n' + (n++),
-								name: title + ' (NAT)',
-								family: 'ipv4',
-								src: d.zone,
-								src_ip: sip,
-								dest_ip: dip,
-								proto: 'all',
-								target: 'MASQUERADE'
+					for (const b of bks) {
+						if (nat == 'dnat') {
+							const ports = b.ports;
+							if (extPorts.length && extPorts.length != ports.length) {
+								problems.push({ conn: cid, msg: 'Number of public ports must match the number of service ports' });
+								break;
+							}
+							/* fw4 redirects take a single src_ip, so emit one redirect per source address */
+							const srcIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
+							if (!srcIps.length) {
+								problems.push({ conn: cid, msg: 'Port forwarding is IPv4 only, but the source has only IPv6 addresses' });
+								break;
+							}
+							ports.forEach((p, i) => srcIps.forEach(ip => {
+								sections.push(withExtra(compact({
+									'.type': 'redirect',
+									'.name': base + 'd' + (n++),
+									name: ttl + ' (' + (extPorts[i] || p) + ')' + (srcIps.length > 1 ? ' ' + ip : ''),
+									target: 'DNAT',
+									family: 'ipv4',
+									src: s.zone,
+									src_ip: ip,
+									ipset: setMatch,
+									src_dport: extPorts[i] || p,
+									dest: d.zone,
+									dest_ip: d.addrs[0],
+									dest_port: p,
+									proto: b.proto,
+									log: c.log ? '1' : null
+								})));
 							}));
+							continue;
+						}
+
+						const rule = {
+							'.type': 'rule',
+							'.name': base + 'r' + (n++),
+							name: ttl,
+							src: s.router ? null : s.zone,
+							dest: d.router ? null : d.zone,
+							src_ip: s.addrs,
+							dest_ip: d.addrs,
+							ipset: setMatch,
+							proto: b.proto,
+							dest_port: b.ports,
+							icmp_type: b.icmp,
+							target: c.action,
+							family: c.family || null,
+							log: c.log ? '1' : null
+						};
+
+						if (b.proto == 'icmp' && (c.family == 'ipv6' || sf == 'ipv6' || df == 'ipv6'))
+							rule.proto = 'icmpv6';
+
+						sections.push(withExtra(compact(rule)));
+					}
+
+					if (nat == 'masq' && c.action == 'ACCEPT' && c.family != 'ipv6') {
+						/* fw4 nat sections take a single src_ip / dest_ip each */
+						const sIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
+						const dIps = d.addrs ? d.addrs.filter(a => !isIPv6(a)) : [ null ];
+						for (const sip of sIps)
+							for (const dip of dIps)
+								sections.push(compact({
+									'.type': 'nat',
+									'.name': base + 'n' + (n++),
+									name: ttl + ' (NAT)',
+									family: 'ipv4',
+									src: d.zone,
+									src_ip: sip,
+									dest_ip: dip,
+									proto: 'all',
+									target: 'MASQUERADE'
+								}));
+					}
 				}
+			}
+		};
+
+		emit(srcEps, dstEps, buckets, c.nat, title);
+
+		/* reverse direction of a bidirectional connection: same action, never NAT */
+		if (c.bidir) {
+			const revErrors = [];
+			const revBuckets = resolveServices(model, c.service_rev || [], revErrors);
+			if (revErrors.length) {
+				for (const msg of uniq(revErrors))
+					problems.push({ conn: cid, msg: msg });
+			}
+			else {
+				const revTitle = c.label ? c.label + ' (←)' : ((dstO ? dstO.label : '?') + ' → ' + (srcO ? srcO.label : '?'));
+				emit(dstEps, srcEps, revBuckets, 'none', revTitle);
 			}
 		}
 	}
 
-	return { sections: sections, problems: problems };
+	/* both directions may report the same problem */
+	const seenProblems = {};
+	return {
+		sections: sections,
+		problems: problems.filter(p => {
+			const k = p.conn + '\n' + p.msg;
+			return seenProblems[k] ? false : (seenProblems[k] = true);
+		})
+	};
 }
 
 /* --- section diffing -------------------------------------------------- */
@@ -693,7 +728,64 @@ function isOwnedFirewallSection(s) {
 /* --- merging parallel connections --------------------------------------- */
 
 function mergeKey(c) {
-	return JSON.stringify([ c.src, c.dest, c.action, c.nat, c.family || '', (c.fwopt || []).slice().sort(), !!c.log, !!c.enabled ]);
+	return JSON.stringify([ c.src, c.dest, c.action, c.nat, c.family || '', (c.fwopt || []).slice().sort(), !!c.log, !!c.enabled, !!c.bidir ]);
+}
+
+/* same settings apart from endpoints, services and NAT */
+function sameSettings(a, b) {
+	return a.action == b.action && (a.family || '') == (b.family || '') && !!a.log == !!b.log && !!a.enabled == !!b.enabled &&
+		JSON.stringify((a.fwopt || []).slice().sort()) == JSON.stringify((b.fwopt || []).slice().sort());
+}
+
+/**
+ * Fold connections among `ids` that run in opposite directions between the
+ * same two objects into one bidirectional connection. The folded one must
+ * not use NAT (the reverse direction never does) and both must have the
+ * same action, family, options, log and state. As in mergeConnections, no
+ * connection with another action may lie between them in the evaluation
+ * order, because the reverse rules move to the position of the kept one.
+ *
+ * Returns the number of connections that were folded into others.
+ */
+function mergeOpposite(model, ids) {
+	const order = connectionOrder(model);
+	const pos = {};
+	order.forEach((id, i) => pos[id] = i);
+	const cand = ids.filter(id => model.connections[id]).sort((a, b) => pos[a] - pos[b]);
+	let merged = 0;
+
+	for (let i = 0; i < cand.length; i++) {
+		const a = model.connections[cand[i]];
+		if (!a) continue;
+		for (let j = i + 1; j < cand.length; j++) {
+			const b = model.connections[cand[j]];
+			if (!b || b.src != a.dest || b.dest != a.src || a.src == a.dest || !sameSettings(a, b))
+				continue;
+			/* keep the one with NAT; the other becomes its reverse direction */
+			let keep = a, fold = b;
+			if (a.nat == 'none' && b.nat != 'none') { keep = b; fold = a; }
+			if (fold.nat != 'none' || fold.bidir)
+				continue;
+			const lo = Math.min(pos[a.id], pos[b.id]), hi = Math.max(pos[a.id], pos[b.id]);
+			const between = order.slice(lo + 1, hi).map(x => model.connections[x]).filter(Boolean);
+			if (!between.every(o => o.action == a.action || !o.enabled))
+				continue;
+			const rev = keep.bidir ? (keep.service_rev || []) : [];
+			keep.bidir = true;
+			keep.service_rev = uniq(rev.concat(fold.service));
+			if (!keep.label && fold.label)
+				keep.label = fold.label;
+			delete model.connections[fold.id];
+			model.order = model.order.filter(x => x != fold.id);
+			merged++;
+			if (keep === b) break;
+		}
+	}
+
+	if (merged)
+		connectionOrder(model);
+
+	return merged;
 }
 
 /**
@@ -725,6 +817,8 @@ function mergeConnections(model, ids) {
 			const between = order.slice(pos[head.id] + 1, pos[id]).map(x => model.connections[x]).filter(Boolean);
 			if (between.every(o => o.action == c.action || !o.enabled)) {
 				head.service = uniq(head.service.concat(c.service));
+				if (c.bidir)
+					head.service_rev = uniq((head.service_rev || []).concat(c.service_rev || []));
 				if (!head.label && c.label)
 					head.label = c.label;
 				else if (head.label && c.label && head.label != c.label)
@@ -1100,5 +1194,6 @@ return baseclass.extend({
 	diffSections: diffSections,
 	isOwnedFirewallSection: isOwnedFirewallSection,
 	importFirewall: importFirewall,
-	mergeConnections: mergeConnections
+	mergeConnections: mergeConnections,
+	mergeOpposite: mergeOpposite
 });

@@ -29,7 +29,7 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
     await p.waitForSelector('.modal .fwd-form');
   };
   const pickService = async label => {
-    const svcRow = p.locator('.modal .fwd-row', { has: p.locator('label', { hasText: 'Services' }) });
+    const svcRow = p.locator('.modal .fwd-row', { has: p.locator('label', { hasText: /^Services$/ }) });
     await svcRow.locator('.cbi-dropdown').click();
     await svcRow.locator(`.cbi-dropdown li[data-value]:has-text("${label}")`).first().click();
     await p.keyboard.press('Escape').catch(()=>{});
