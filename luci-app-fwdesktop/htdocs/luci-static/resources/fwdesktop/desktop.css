@@ -434,3 +434,13 @@ body.fwd-max .fwd-canvas-wrap {
 
 .fwd-radio { display: flex; gap: .6em; align-items: flex-start; margin: .6em 0; cursor: pointer; }
 .fwd-radio input { margin-top: .3em; }
+
+/* rule list of a line: objects A and B in the header */
+.fwd-pair { display: flex; align-items: center; gap: .8em; flex-wrap: wrap; margin: .2em 0 .8em; }
+.fwd-pair-obj { border: 1px solid var(--fwd-node-border, rgba(127,127,127,.45)); border-radius: 8px; padding: .4em .8em; }
+.fwd-pair-tag {
+	display: inline-block; min-width: 1.6em; text-align: center; margin-right: .5em;
+	border-radius: 1em; background: var(--fwd-accent, #3a7bd5); color: #fff; font-weight: bold; font-size: 85%;
+}
+.fwd-pair-arrow { font-size: 140%; opacity: .6; }
+select.fwd-dir { width: auto; min-width: 7em; }

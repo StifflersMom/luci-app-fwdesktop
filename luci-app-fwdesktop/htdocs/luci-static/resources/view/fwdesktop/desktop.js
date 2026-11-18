@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-26';
+const ASSET_REV = '1.0.0-27';
 
 const RT_TABLES = '/etc/iproute2/rt_tables';
 
@@ -706,10 +706,9 @@ return view.extend({
 		return b;
 	},
 
-	/* direction of a connection as text, from the point of view of src */
-	connDirection(c) {
-		const lbl = id => this.model.objects[id] ? this.model.objects[id].label : '?';
-		return (c.bidir ? '%s ⇄ %s' : '%s → %s').format(lbl(c.src), lbl(c.dest));
+	/* direction of a rule seen from object a: → (a starts), ← (the other one starts) or ↔ */
+	dirSymbol(c, a) {
+		return c.bidir ? '↔' : (c.src == a ? '→' : '←');
 	},
 
 	edgeGeometry(bundles) {
@@ -765,21 +764,12 @@ return view.extend({
 		return geo;
 	},
 
-	connServices(c, rev) {
-		const list = rev ? (c.service_rev || []) : c.service;
-		return list.length ? list.map(id => fwm.serviceLabel(this.model, id)) : [ _('Any') ];
-	},
-
-	/* "HTTPS" or, both ways, "HTTPS ⇄ DNS" (one side only when they are the same) */
-	servicesText(c) {
-		const f = this.connServices(c).join(', ');
-		if (!c.bidir) return f;
-		const r = this.connServices(c, true).join(', ');
-		return f == r ? f : f + ' ⇄ ' + r;
+	connServices(c) {
+		return c.service.length ? c.service.map(id => fwm.serviceLabel(this.model, id)) : [ _('Any') ];
 	},
 
 	edgeLabel(c) {
-		let s = this.servicesText(c);
+		let s = this.connServices(c).join(', ');
 		if (c.nat == 'masq') s = 'NAT · ' + s;
 		if (c.nat == 'dnat') s = _('Forward') + ' · ' + s;
 		return s;
@@ -790,7 +780,7 @@ return view.extend({
 			return trunc(this.edgeLabel(bd.conns[0]), 30);
 		const svcs = [];
 		for (const c of bd.conns)
-			for (const l of this.connServices(c).concat(c.bidir ? this.connServices(c, true) : []))
+			for (const l of this.connServices(c))
 				if (!svcs.includes(l)) svcs.push(l);
 		return trunc('%d × · %s'.format(bd.conns.length, svcs.join(', ')), 30);
 	},
@@ -911,12 +901,12 @@ return view.extend({
 			this.tipKey = key;
 			const so = this.model.objects[bd.src], dob = this.model.objects[bd.dest];
 			dom.content(this.tooltip, [
-				E('div', { 'class': 'fwd-tip-title' }, [ (bd.rev ? '%s ⇄ %s' : '%s → %s').format(so.label, dob.label) ]),
+				E('div', { 'class': 'fwd-tip-title' }, [ (bd.rev ? '%s — %s' : '%s → %s').format(so.label, dob.label) ]),
 				E('table', {}, bd.conns.map(c => E('tr', { 'class': c.enabled ? '' : 'disabled' }, [
 					E('td', {}, [ E('span', { 'class': 'fwd-pill ' + c.action }, [ ACTION_LABELS[c.action] ]) ]),
 					E('td', {}, [
-						bd.rev ? E('div', { 'class': 'fwd-tip-sub' }, [ this.connDirection(c) ]) : '',
-						this.servicesText(c),
+						bd.rev ? E('strong', [ this.dirSymbol(c, bd.src) + ' ' ]) : '',
+						this.connServices(c).join(', '),
 						c.nat == 'masq' ? E('em', [ ' · NAT' ]) : '',
 						c.nat == 'dnat' ? E('em', [ ' · ' + _('port forward') + (c.ext_port ? ' ' + c.ext_port : '') ]) : '',
 						c.family ? E('em', [ ' · ' + (c.family == 'ipv4' ? 'IPv4' : 'IPv6') ]) : '',
@@ -925,7 +915,7 @@ return view.extend({
 						...((this.problems[c.id] || []).map(p => E('div', { 'class': 'fwd-problem' }, [ p ])))
 					])
 				]))),
-				E('div', { 'class': 'fwd-tip-sub' }, [ bd.conns.length > 1 ? _('Click to manage these connections') : _('Click to edit') ])
+				E('div', { 'class': 'fwd-tip-sub' }, [ _('Click to manage the rules of this line') ])
 			]);
 		}
 
@@ -962,10 +952,7 @@ return view.extend({
 		if (!bd) return;
 		if (bd.policy)
 			return this.policyDialog(bd);
-		if (bd.conns.length == 1)
-			this.editConnection(bd.conns[0].id);
-		else
-			this.bundleDialog(key);
+		this.bundleDialog(key);
 	},
 
 	policyDialog(bd) {
@@ -1101,8 +1088,14 @@ return view.extend({
 		case 'connect':
 			dom.content(this.tempLayer, []);
 			this.nodeLayer.querySelectorAll('.drop-target').forEach(n => n.classList.remove('drop-target'));
-			if (d.target && ev.type == 'pointerup')
-				this.editConnection(null, { src: d.id, dest: d.target });
+			if (d.target && ev.type == 'pointerup') {
+				/* A is where the drag started; a line that exists opens its rule list */
+				const key = this.pairKey(d.id, d.target);
+				if (this.bundles()[key])
+					this.bundleDialog(key, d.id);
+				else
+					this.editConnection(null, { src: d.id, dest: d.target }, () => this.bundleDialog(key, d.id), d.id);
+			}
 			break;
 
 		case 'edge':
@@ -1489,10 +1482,14 @@ return view.extend({
 		return dPublic && !dPrivateOnly;
 	},
 
-	editConnection(id, preset, onDone) {
+	/*
+	 * Edit one rule of the line between object A and object B. `sideA` says
+	 * which object is A (the one a drag started from); default the source.
+	 */
+	editConnection(id, preset, onDone, sideA) {
 		const isNew = !id;
 		const c = isNew ? Object.assign({
-			id: fwm.randomId('c', this.model.connections), src: null, dest: null, service: [], bidir: false, service_rev: [],
+			id: fwm.randomId('c', this.model.connections), src: null, dest: null, service: [], bidir: false,
 			action: 'ACCEPT', nat: 'none', ext_port: '', family: '', fwopt: [], log: false, enabled: true, label: '', comment: ''
 		}, preset || {}) : clone(this.model.connections[id]);
 
@@ -1504,20 +1501,22 @@ return view.extend({
 		for (const oid in this.model.objects)
 			objChoices[oid] = '%s (%s)'.format(this.model.objects[oid].label, TYPE_LABELS[this.model.objects[oid].type]);
 
+		const A = (sideA && (sideA == c.src || sideA == c.dest)) ? sideA : c.src;
+		const B = A == c.src ? c.dest : c.src;
+		const lbl = oid => this.model.objects[oid] ? this.model.objects[oid].label : '?';
 		const wLabel = new ui.Textfield(c.label, { optional: true, placeholder: _('automatic') });
-		const wSrc = new ui.Select(c.src, objChoices, { optional: false, sort: true });
-		const wDest = new ui.Select(c.dest, objChoices, { optional: false, sort: true });
+		const wA = new ui.Select(A, objChoices, { optional: false, sort: true });
+		const wB = new ui.Select(B, objChoices, { optional: false, sort: true });
+		const wDir = new ui.Select(c.bidir ? 'both' : (c.src == A ? 'fwd' : 'rev'), {
+			fwd: _('A → B'), rev: _('A ← B'), both: _('A ↔ B (both ways)')
+		}, { optional: false, sort: false });
 		const wSvc = new ui.Dropdown(c.service, this.serviceChoices(), {
 			multiple: true, optional: false, placeholder: _('-- choose services --'), display_items: 5, dropdown_items: 12, sort: false
-		});
-		const wDir = new ui.Select(c.bidir ? '1' : '0', { '0': _('One way (From → To)'), '1': _('Both ways') }, { optional: false, sort: false });
-		const wSvcRev = new ui.Dropdown(c.service_rev || [], this.serviceChoices(), {
-			multiple: true, optional: true, placeholder: _('-- choose services --'), display_items: 5, dropdown_items: 12, sort: false
 		});
 		const wAction = new ui.Select(c.action, ACTION_LABELS, { optional: false, sort: false });
 		const wNat = new ui.Select(c.nat, {
 			none: _('None'),
-			masq: _('Masquerade (hide source behind the router address; From → To only)'),
+			masq: _('Masquerade (hide source behind the router address; for A ↔ B only A → B)'),
 			dnat: _('Port forwarding (publish target host on the router)')
 		}, { optional: false, sort: false });
 		const wExt = new ui.Textfield(c.ext_port, { optional: true, datatype: 'list(portrange)', placeholder: _('same as service port') });
@@ -1532,11 +1531,10 @@ return view.extend({
 		const problems = E('div');
 
 		const form = E('div', { 'class': 'fwd-form' }, [
-			this.formRow(_('From'), wSrc),
-			this.formRow(_('To'), wDest),
-			this.formRow(_('Direction'), wDir, _('"Both ways" also handles connections started on the "To" side, with their own services. Action, IP family, logging and options apply to both directions.')),
-			this.formRow(_('Services'), wSvc, _('Traffic matching any of these services is handled by this connection. Replies are allowed automatically.')),
-			this.formRow(_('Services back'), wSvcRev, _('Services for connections started on the "To" side (To → From).'), 'rev'),
+			this.formRow(_('Object A'), wA),
+			this.formRow(_('Object B'), wB),
+			this.formRow(_('Direction'), wDir, _('Who may start connections: A → B, B → A (shown as A ← B) or both. Replies are allowed automatically.')),
+			this.formRow(_('Services'), wSvc, _('Traffic matching any of these services is handled by this rule.')),
 			this.formRow(_('Action'), wAction),
 			this.formRow(_('NAT'), wNat, null, 'nat'),
 			this.formRow(_('Public ports'), wExt, _('Optional, one port per service port, in the same order. Leave empty to use the same port numbers.'), 'ext'),
@@ -1553,11 +1551,11 @@ return view.extend({
 
 		const read = () => {
 			c.label = wLabel.getValue().trim();
-			c.src = wSrc.getValue();
-			c.dest = wDest.getValue();
+			const a = wA.getValue(), b = wB.getValue(), dir = wDir.getValue();
+			c.src = dir == 'rev' ? b : a;
+			c.dest = dir == 'rev' ? a : b;
+			c.bidir = dir == 'both' && a != b;
 			c.service = fwm.toList(wSvc.getValue());
-			c.bidir = wDir.getValue() == '1';
-			c.service_rev = c.bidir ? fwm.toList(wSvcRev.getValue()) : [];
 			c.action = wAction.getValue() || 'ACCEPT';
 			c.nat = wNat.getValue() || 'none';
 			c.ext_port = c.nat == 'dnat' ? wExt.getValue().trim() : '';
@@ -1568,18 +1566,20 @@ return view.extend({
 			c.fwopt = fwm.toList(wOpts.getValue()).filter(kv => FWOPT_RE.test(kv));
 		};
 
-		let wasBidir = c.bidir;
+		/* a new rule follows the masquerading preset until NAT is chosen by hand */
+		let autoNat = isNew ? c.nat : null;
 		const update = () => {
 			read();
-			/* switching to both ways starts with the same services back */
-			const prefill = c.bidir && !wasBidir && !c.service_rev.length && c.service.length;
-			wasBidir = c.bidir;
-			if (prefill) {
-				/* setValue fires widget-change, which runs update() again */
-				c.service_rev = c.service.slice();
-				return wSvcRev.setValue(c.service.slice());
+			if (autoNat != null && c.nat == autoNat) {
+				const want = this.wantsMasq(c.src, c.dest) ? 'masq' : 'none';
+				if (want != c.nat) {
+					autoNat = c.nat = want;
+					wNat.setValue(want);
+				}
 			}
-			this.showRow(form, 'rev', c.bidir);
+			else {
+				autoNat = null;
+			}
 			this.showRow(form, 'nat', c.action == 'ACCEPT');
 			if (c.action != 'ACCEPT') c.nat = 'none';
 			this.showRow(form, 'ext', c.nat == 'dnat');
@@ -1599,15 +1599,9 @@ return view.extend({
 			read();
 			if (c.action != 'ACCEPT') c.nat = 'none';
 			if (!c.src || !c.dest)
-				return ui.addNotification(null, E('p', [ _('Please choose source and destination.') ]), 'warning');
+				return ui.addNotification(null, E('p', [ _('Please choose objects A and B.') ]), 'warning');
 			if (!c.service.length)
 				return ui.addNotification(null, E('p', [ _('Please choose at least one service ("Any" allows everything).') ]), 'warning');
-			if (c.bidir && !c.service_rev.length)
-				return ui.addNotification(null, E('p', [ _('Please choose at least one service for the way back.') ]), 'warning');
-			if (c.bidir && c.src == c.dest)
-				c.bidir = false;
-			if (!c.bidir)
-				c.service_rev = [];
 			if (c.nat == 'dnat' && wExt.isValid && !wExt.isValid())
 				return ui.addNotification(null, E('p', [ _('Invalid public port.') ]), 'warning');
 
@@ -1620,7 +1614,7 @@ return view.extend({
 			if (onDone) onDone();
 		};
 
-		ui.showModal(isNew ? _('New connection') : _('Edit connection'), [
+		ui.showModal((isNew ? _('New rule: %s — %s') : _('Edit rule: %s — %s')).format(lbl(A), lbl(B)), [
 			form,
 			this.dialogButtons(isNew ? null : () => { ui.hideModal(); this.deleteConnection(c.id, !onDone, onDone); }, save,
 				onDone ? () => { ui.hideModal(); onDone(); } : null)
@@ -1651,73 +1645,91 @@ return view.extend({
 		]);
 	},
 
-	/* one dialog for every connection between two objects, both directions */
-	bundleDialog(key) {
-		const reopen = () => {
-			const bd = this.bundles()[key];
-			if (bd && bd.conns.length > 1)
-				this.bundleDialog(key);
-		};
+	/*
+	 * The rule list of one line: objects A and B in the header (A is where
+	 * the drag started), one row per rule with its own services and direction.
+	 */
+	bundleDialog(key, sideA) {
 		const bd = this.bundles()[key];
 		if (!bd) return;
-		const src = bd.src, dest = bd.dest;
+		const A = (sideA == bd.src || sideA == bd.dest) ? sideA : bd.src;
+		const B = A == bd.src ? bd.dest : bd.src;
+		const reopen = () => { if (this.bundles()[key]) this.bundleDialog(key, A); };
 
 		const order = fwm.connectionOrder(this.model);
-		const so = this.model.objects[src], dob = this.model.objects[dest];
+		const oa = this.model.objects[A], ob = this.model.objects[B];
 		const btn = (title, cls, fn) => E('button', { 'class': 'cbi-button ' + cls, 'click': fn }, [ title ]);
-		const pills = (c, rev) => this.connServices(c, rev).map(l => E('span', { 'class': 'fwd-pill' }, [ l ]));
+		const DIRS = { fwd: 'A → B', rev: 'A ← B', both: 'A ↔ B' };
+
+		const setDir = (c, dir) => {
+			c.src = dir == 'rev' ? B : A;
+			c.dest = dir == 'rev' ? A : B;
+			c.bidir = dir == 'both';
+			this.markDirty();
+			reopen();
+		};
 
 		const rows = bd.conns.map(c => {
 			const prob = this.problems[c.id];
+			const cur = c.bidir ? 'both' : (c.src == A ? 'fwd' : 'rev');
+			const dirSel = A == B ? E('span', [ '↻' ]) : E('select', {
+				'class': 'cbi-input-select fwd-dir', 'title': _('Direction'),
+				'change': ev => setDir(c, ev.target.value)
+			}, Object.keys(DIRS).map(k => E('option', { 'value': k, 'selected': k == cur ? '' : null }, [ DIRS[k] ])));
+			const opts = [
+				{ none: '', masq: _('Masquerade'), dnat: _('Port forward') + (c.ext_port ? ' ' + c.ext_port : '') }[c.nat],
+				c.family ? (c.family == 'ipv4' ? 'IPv4' : 'IPv6') : '',
+				c.log ? _('log') : '',
+				(c.fwopt || []).join(' ')
+			].filter(Boolean).join(' · ') || '-';
 			return E('tr', { 'class': 'tr' + (c.enabled ? '' : ' disabled') }, [
 				E('td', { 'class': 'td' }, [ String(order.indexOf(c.id) + 1) ]),
-				E('td', { 'class': 'td' }, [ this.connDirection(c) ]),
-				E('td', { 'class': 'td' }, c.bidir
-					? [ E('div', [ '→ ' ].concat(pills(c))), E('div', [ '← ' ].concat(pills(c, true))) ]
-					: pills(c)),
+				E('td', { 'class': 'td' }, this.connServices(c).map(l => E('span', { 'class': 'fwd-pill' }, [ l ]))
+					.concat(c.label ? [ E('div', { 'class': 'fwd-tip-sub' }, [ c.label ]) ] : [])
+					.concat(prob ? prob.map(p => E('div', { 'class': 'fwd-problem' }, [ p ])) : [])),
+				E('td', { 'class': 'td' }, [ dirSel ]),
 				E('td', { 'class': 'td' }, [ E('span', { 'class': 'fwd-pill ' + c.action }, [ ACTION_LABELS[c.action] ]) ]),
-				E('td', { 'class': 'td' }, [
-					[ { none: '', masq: _('Masquerade'), dnat: _('Port forward') + (c.ext_port ? ' ' + c.ext_port : '') }[c.nat],
-					  c.family ? (c.family == 'ipv4' ? 'IPv4' : 'IPv6') : '',
-					  (c.fwopt || []).join(' ') ].filter(Boolean).join(' · ') || '-'
-				]),
-				E('td', { 'class': 'td' }, [ c.label || '' ].concat(prob ? prob.map(p => E('div', { 'class': 'fwd-problem' }, [ p ])) : [])),
+				E('td', { 'class': 'td' }, [ opts ]),
 				E('td', { 'class': 'td fwd-actions' }, [
 					btn(c.enabled ? _('Disable') : _('Enable'), '', () => { c.enabled = !c.enabled; this.markDirty(); reopen(); }),
-					btn(_('Edit'), 'cbi-button-edit', () => { ui.hideModal(); this.editConnection(c.id, null, reopen); }),
+					btn(_('Edit'), 'cbi-button-edit', () => { ui.hideModal(); this.editConnection(c.id, null, reopen, A); }),
 					btn(_('Delete'), 'cbi-button-remove', () => this.deleteConnection(c.id, false, reopen))
 				])
 			]);
 		});
 
-		/* same direction with other services, then opposite directions into one */
+		/* same direction with other services, then the same services in opposite directions */
 		const mergeAll = model => {
 			const ids = bd.conns.map(c => c.id);
 			const n = fwm.mergeConnections(model, ids);
 			return n + fwm.mergeOpposite(model, ids.filter(id => model.connections[id]));
 		};
 		const mergeable = mergeAll(clone(this.model));
-
 		const doMerge = () => {
 			const n = mergeAll(this.model);
 			ui.hideModal();
 			this.markDirty();
-			ui.addNotification(null, E('p', [ _('Merged %d connection(s). The generated rules behave the same.').format(n) ]), 'info');
+			ui.addNotification(null, E('p', [ _('Merged %d rule(s). The generated firewall rules behave the same.').format(n) ]), 'info');
 			reopen();
 		};
 
-		const title = (bd.rev ? '%s ⇄ %s' : '%s → %s').format(so.label, dob.label);
-		ui.showModal(title, [
-			E('p', [ _('All connections between "%s" and "%s", in both directions. The number is their position in the evaluation order (first match wins).').format(so.label, dob.label) ]),
+		const objBox = (tag, o) => E('div', { 'class': 'fwd-pair-obj' }, [
+			E('span', { 'class': 'fwd-pair-tag' }, [ tag ]),
+			E('strong', [ o.label ]), ' ', E('span', { 'class': 'fwd-tip-sub' }, [ TYPE_LABELS[o.type] ])
+		]);
+
+		ui.showModal('%s — %s'.format(oa.label, ob.label), [
+			E('div', { 'class': 'fwd-pair' }, [ objBox('A', oa), E('span', { 'class': 'fwd-pair-arrow' }, [ '⟷' ]), objBox('B', ob) ]),
+			E('p', { 'class': 'cbi-section-descr' }, [ _('Each rule has its own services and direction. The number is its position in the evaluation order (first match wins).') ]),
 			E('div', { 'style': 'max-height:55vh;overflow:auto' }, [
-				this.table([ '#', _('Direction'), _('Services'), _('Action'), _('Options'), _('Name / problems'), '' ], rows, '')
+				this.table([ '#', _('Services / name'), _('Direction'), _('Action'), _('Options'), '' ], rows, _('No rules yet.'))
 			]),
 			E('div', { 'class': 'fwd-dialog-buttons' }, [
-				btn(_('+ %s → %s').format(so.label, dob.label), 'cbi-button-add fwd-left', () => { ui.hideModal(); this.editConnection(null, { src: src, dest: dest }, reopen); }),
-				src != dest ? btn(_('+ %s → %s').format(dob.label, so.label), 'cbi-button-add fwd-left', () => { ui.hideModal(); this.editConnection(null, { src: dest, dest: src }, reopen); }) : '',
+				btn(_('+ Add rule'), 'cbi-button-add fwd-left', () => { ui.hideModal(); this.editConnection(null, { src: A, dest: B }, reopen, A); }),
+				A != B ? btn(_('Swap A and B'), 'fwd-left', () => { ui.hideModal(); this.bundleDialog(key, B); }) : '',
 				mergeable ? E('button', {
 					'class': 'cbi-button cbi-button-action', 'click': doMerge,
-					'title': _('Combine connections that only differ in their services, and opposite directions with the same settings, into one')
+					'title': _('Combine rules that only differ in their services, and rules with the same services in opposite directions')
 				}, [ _('Merge %d compatible').format(Math.min(mergeable + 1, bd.conns.length)) ]) : '',
 				btn(_('Close'), '', ui.hideModal)
 			])
@@ -1828,7 +1840,7 @@ return view.extend({
 			return s ? s.label : id;
 		}).join(', ');
 		let s = '%s → %s: %s, %s'.format(lbl(c.src), lbl(c.dest), svcs, ACTION_LABELS[c.action]);
-		if (c.bidir) s += ', ' + _('back: %s').format((c.service_rev || []).map(id => fwm.serviceLabel(model, id)).join(', ') || _('Any'));
+		if (c.bidir) s += ', ' + _('both ways');
 		if (c.nat == 'dnat') s += ', ' + _('port forward') + (c.ext_port ? ' ' + c.ext_port : '');
 		if (c.family) s += ', ' + (c.family == 'ipv4' ? 'IPv4' : 'IPv6');
 		if (c.fwopt && c.fwopt.length) s += ', ' + c.fwopt.join(' ');
@@ -1935,11 +1947,8 @@ return view.extend({
 			return E('tr', { 'class': 'tr' + (c.enabled ? '' : ' disabled') }, [
 				E('td', { 'class': 'td' }, [ String(i + 1) ]),
 				E('td', { 'class': 'td' }, [ so ? so.label : '?' ]),
-				E('td', { 'class': 'td' }, [ dob ? dob.label : '?' ]),
-				E('td', { 'class': 'td' }, c.bidir
-					? [ E('div', [ '→ ' ].concat(this.connServices(c).map(l => E('span', { 'class': 'fwd-pill' }, [ l ])))),
-					    E('div', [ '← ' ].concat(this.connServices(c, true).map(l => E('span', { 'class': 'fwd-pill' }, [ l ])))) ]
-					: this.connServices(c).map(l => E('span', { 'class': 'fwd-pill' }, [ l ]))),
+				E('td', { 'class': 'td' }, [ c.bidir ? E('span', { 'title': _('both ways') }, [ '↔ ' ]) : '', dob ? dob.label : '?' ]),
+				E('td', { 'class': 'td' }, this.connServices(c).map(l => E('span', { 'class': 'fwd-pill' }, [ l ]))),
 				E('td', { 'class': 'td' }, [ E('span', { 'class': 'fwd-pill ' + c.action }, [ ACTION_LABELS[c.action] ]) ]),
 				E('td', { 'class': 'td' }, [ { none: '-', masq: _('Masquerade'), dnat: _('Port forward') + (c.ext_port ? ' (' + c.ext_port + ')' : '') }[c.nat] ]),
 				E('td', { 'class': 'td' }, [ c.label || '' ].concat(prob ? prob.map(p => E('div', { 'class': 'fwd-problem' }, [ p ])) : [])),

@@ -26,7 +26,8 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
     await p.mouse.move(t.x + 40, t.y + 20, { steps: 8 });
     await p.mouse.move(t.x + 50, t.y + 25, { steps: 2 });
     await p.mouse.up();
-    await p.waitForSelector('.modal .fwd-form');
+    await p.waitForSelector('.modal .fwd-form, .modal .fwd-pair'); await p.waitForTimeout(300);
+    if (!(await p.locator('.modal .fwd-form').count())) { await p.click('.modal button:has-text("+ Add rule")'); await p.waitForSelector('.modal .fwd-form'); }
   };
   const pickService = async label => {
     const svcRow = p.locator('.modal .fwd-row', { has: p.locator('label', { hasText: /^Services$/ }) });
@@ -44,7 +45,7 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
   const addr = p.locator('.modal .cbi-dynlist .create-item-input').first();
   await addr.fill('192.168.1.10'); await addr.press('Enter');
   await p.screenshot({ path: out + '/dlg-host.png' });
-  await p.click('.modal button:has-text("Apply")');
+  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(300); if (await p.locator('.modal .fwd-pair').count()) await p.click('.modal button:has-text(\"Close\")');
   await p.waitForTimeout(300);
 
   // move NAS somewhere free
@@ -56,7 +57,7 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
   await connect('LAN', 'Internet');
   await pickService('HTTPS (TCP 443)'); await pickService('DNS (TCP+UDP 53)');
   await p.screenshot({ path: out + '/dlg-conn.png' });
-  await p.click('.modal button:has-text("Apply")');
+  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(300); if (await p.locator('.modal .fwd-pair').count()) await p.click('.modal button:has-text(\"Close\")');
   await p.waitForTimeout(300);
 
   // 3. Internet -> NAS port forward, HTTPS
@@ -67,13 +68,13 @@ const BASE = process.env.BASE || 'http://127.0.0.1:8081';
   await row('Public ports').locator('input').fill('8443');
   await p.waitForTimeout(200);
   await p.screenshot({ path: out + '/dlg-dnat.png' });
-  await p.click('.modal button:has-text("Apply")');
+  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(300); if (await p.locator('.modal .fwd-pair').count()) await p.click('.modal button:has-text(\"Close\")');
   await p.waitForTimeout(300);
 
   // 4. LAN -> router (SSH) with log
   await connect('LAN', 'This router');
   await pickService('SSH (TCP 22)');
-  await p.click('.modal button:has-text("Apply")');
+  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(300); if (await p.locator('.modal .fwd-pair').count()) await p.click('.modal button:has-text(\"Close\")');
   await p.waitForTimeout(300);
   await p.screenshot({ path: out + '/desktop-conns.png' });
 

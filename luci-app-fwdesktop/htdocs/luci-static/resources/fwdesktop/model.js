@@ -31,8 +31,7 @@
  *       option src     '<object id>'
  *       option dest    '<object id>'
  *       list   service '<service id>'
- *       option bidir   '1'               (traffic is also allowed from dest to src ...)
- *       list   service_rev '<service id>' (... with these services; empty = any)
+ *       option bidir   '1'               (same services also from dest to src)
  *       option action  'ACCEPT' | 'REJECT' | 'DROP'
  *       option nat     'none' | 'masq' | 'dnat'
  *       option ext_port '8080'            (dnat: public port)
@@ -42,8 +41,10 @@
  *       option enabled '0' | '1'
  *       option label / option comment
  *
- * Action, family, options, log and state apply to both directions of a
- * bidirectional connection; NAT and port forwarding only to src -> dest.
+ * A connection is one rule between two objects: its services, one
+ * direction (or both with bidir) and its action. All connections between
+ * the same two objects form the rule list of one line on the desktop.
+ * NAT and port forwarding of a bidirectional rule apply to src -> dest.
  *
  * Generated firewall sections are named "fwd_<connection id>_<r|d|n><n>" so they
  * can be told apart from hand written ones and replaced as a whole.
@@ -172,7 +173,6 @@ function fromSections(sections) {
 				dest: s.dest,
 				service: toList(s.service),
 				bidir: s.bidir == '1',
-				service_rev: toList(s.service_rev),
 				action: ACTIONS.includes(s.action) ? s.action : 'ACCEPT',
 				nat: [ 'masq', 'dnat' ].includes(s.nat) ? s.nat : 'none',
 				ext_port: s.ext_port || '',
@@ -184,6 +184,18 @@ function fromSections(sections) {
 				comment: s.comment || ''
 			};
 			model.order.push(id);
+
+			/* early test builds stored other services for the way back: own rule for them */
+			const rev = toList(s.service_rev);
+			if (s.bidir == '1' && rev.length && rev.slice().sort().join(' ') != toList(s.service).slice().sort().join(' ')) {
+				const c = model.connections[id];
+				c.bidir = false;
+				const rid = randomId('c', model.connections);
+				model.connections[rid] = Object.assign({}, c, {
+					id: rid, src: c.dest, dest: c.src, service: rev, nat: 'none', ext_port: '', fwopt: c.fwopt.slice(), label: ''
+				});
+				model.order.push(rid);
+			}
 			break;
 		}
 	}
@@ -243,7 +255,6 @@ function toSections(model) {
 			dest: c.dest,
 			service: c.service,
 			bidir: c.bidir ? '1' : null,
-			service_rev: c.bidir ? c.service_rev : null,
 			action: c.action,
 			nat: c.nat != 'none' ? c.nat : null,
 			ext_port: c.nat == 'dnat' ? c.ext_port : null,
@@ -645,18 +656,10 @@ function generate(model) {
 
 		emit(srcEps, dstEps, buckets, c.nat, title);
 
-		/* reverse direction of a bidirectional connection: same action, never NAT */
-		if (c.bidir) {
-			const revErrors = [];
-			const revBuckets = resolveServices(model, c.service_rev || [], revErrors);
-			if (revErrors.length) {
-				for (const msg of uniq(revErrors))
-					problems.push({ conn: cid, msg: msg });
-			}
-			else {
-				const revTitle = c.label ? c.label + ' (←)' : ((dstO ? dstO.label : '?') + ' → ' + (srcO ? srcO.label : '?'));
-				emit(dstEps, srcEps, revBuckets, 'none', revTitle);
-			}
+		/* reverse direction of a bidirectional connection: same services and action, never NAT */
+		if (c.bidir && c.src != c.dest) {
+			const revTitle = c.label ? c.label + ' (←)' : ((dstO ? dstO.label : '?') + ' → ' + (srcO ? srcO.label : '?'));
+			emit(dstEps, srcEps, buckets, 'none', revTitle);
 		}
 	}
 
@@ -739,9 +742,9 @@ function sameSettings(a, b) {
 
 /**
  * Fold connections among `ids` that run in opposite directions between the
- * same two objects into one bidirectional connection. The folded one must
- * not use NAT (the reverse direction never does) and both must have the
- * same action, family, options, log and state. As in mergeConnections, no
+ * same two objects with the same services into one bidirectional rule. The
+ * folded one must not use NAT (the reverse direction never does) and both
+ * must have the same action, family, options, log and state. As in mergeConnections, no
  * connection with another action may lie between them in the evaluation
  * order, because the reverse rules move to the position of the kept one.
  *
@@ -759,20 +762,19 @@ function mergeOpposite(model, ids) {
 		if (!a) continue;
 		for (let j = i + 1; j < cand.length; j++) {
 			const b = model.connections[cand[j]];
-			if (!b || b.src != a.dest || b.dest != a.src || a.src == a.dest || !sameSettings(a, b))
+			if (!b || b.src != a.dest || b.dest != a.src || a.src == a.dest || !sameSettings(a, b) ||
+			    a.service.slice().sort().join(' ') != b.service.slice().sort().join(' '))
 				continue;
 			/* keep the one with NAT; the other becomes its reverse direction */
 			let keep = a, fold = b;
 			if (a.nat == 'none' && b.nat != 'none') { keep = b; fold = a; }
-			if (fold.nat != 'none' || fold.bidir)
+			if (fold.nat != 'none' || keep.bidir || fold.bidir)
 				continue;
 			const lo = Math.min(pos[a.id], pos[b.id]), hi = Math.max(pos[a.id], pos[b.id]);
 			const between = order.slice(lo + 1, hi).map(x => model.connections[x]).filter(Boolean);
 			if (!between.every(o => o.action == a.action || !o.enabled))
 				continue;
-			const rev = keep.bidir ? (keep.service_rev || []) : [];
 			keep.bidir = true;
-			keep.service_rev = uniq(rev.concat(fold.service));
 			if (!keep.label && fold.label)
 				keep.label = fold.label;
 			delete model.connections[fold.id];
@@ -817,8 +819,6 @@ function mergeConnections(model, ids) {
 			const between = order.slice(pos[head.id] + 1, pos[id]).map(x => model.connections[x]).filter(Boolean);
 			if (between.every(o => o.action == c.action || !o.enabled)) {
 				head.service = uniq(head.service.concat(c.service));
-				if (c.bidir)
-					head.service_rev = uniq((head.service_rev || []).concat(c.service_rev || []));
 				if (!head.label && c.label)
 					head.label = c.label;
 				else if (head.label && c.label && head.label != c.label)

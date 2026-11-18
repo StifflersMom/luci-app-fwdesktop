@@ -1,4 +1,4 @@
-// One line per object pair, "both ways" connections, merging opposite directions, masquerading preset.
+// Line = rule list between A and B, each rule with its own services and direction; masquerading preset.
 const { chromium } = require('playwright');
 const { execFileSync } = require('child_process');
 const path = require('path');
@@ -23,7 +23,7 @@ const ok = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process
     const t = await node(z).locator('.fwd-box').boundingBox();
     await p.mouse.move(h.x + h.width / 2, h.y + h.height / 2); await p.mouse.down();
     await p.mouse.move(t.x + 40, t.y + 20, { steps: 8 }); await p.mouse.move(t.x + 50, t.y + 25, { steps: 2 }); await p.mouse.up();
-    await p.waitForSelector('.modal .fwd-form');
+    await p.waitForSelector('.modal .fwd-form, .modal .fwd-pair'); await p.waitForTimeout(300);
   };
   const pick = async (rowLabel, label) => {
     const r = row(rowLabel);
@@ -35,59 +35,70 @@ const ok = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process
   const chosen = async rowLabel => (await row(rowLabel).locator('.cbi-dropdown > ul > li[selected]').allInnerTexts()).map(t => t.trim());
   const edges = (a, z) => p.locator(`.fwd-edge[data-bundle="${[a, z].sort().join('|')}"]`);
 
-  // masquerading preset: private host -> internet zone (wan has zone masq on), not between two LAN hosts
-  await connect('PCs', 'Internet');
-  ok(await row('NAT').locator('select').inputValue() == 'masq', 'PCs → Internet preselects masquerading');
-  await p.click('.modal button:has-text("Cancel")');
-  await connect('Server', 'Internet');
-  ok(await row('NAT').locator('select').inputValue() == 'masq', 'Server → Internet preselects masquerading');
-  await p.click('.modal button:has-text("Cancel")');
-  await connect('Trusted', 'Server');
-  ok(await row('NAT').locator('select').inputValue() == 'none', 'public network → LAN host: no masquerading');
-  await p.click('.modal button:has-text("Cancel")');
+  // a drag onto an object with a line opens the rule list; new rule from there
+  const newRule = async () => {
+    if (!(await p.locator('.modal .fwd-form').count())) await p.click('.modal button:has-text("+ Add rule")');
+    await p.waitForSelector('.modal .fwd-form');
+  };
+  const cancel = async () => { await p.click('.modal button:has-text("Cancel")'); await p.waitForTimeout(300); if (await p.locator('.modal button:has-text("Close")').count()) await p.click('.modal button:has-text("Close")'); await p.waitForTimeout(200); };
 
-  // both ways: Server -> PCs HTTPS, back SSH
+  // masquerading preset: private -> internet zone (wan has zone masq on), not between LAN hosts or from outside
+  await connect('PCs', 'Internet'); await newRule();
+  ok(await row('NAT').locator('select').inputValue() == 'masq', 'PCs → Internet preselects masquerading');
+  await row('Direction').locator('select').selectOption('rev'); await p.waitForTimeout(200);
+  ok(await row('NAT').locator('select').inputValue() == 'none', 'turning it into Internet → PCs drops the preset');
+  await cancel();
+  await connect('Server', 'Internet'); await newRule();
+  ok(await row('NAT').locator('select').inputValue() == 'masq', 'Server → Internet preselects masquerading');
+  await cancel();
+  await connect('Trusted', 'Server');
+  ok(await p.locator('.modal .fwd-pair-obj strong').first().innerText() == 'Trusted', 'existing line: rule list opens with A = drag start');
+  await newRule();
+  ok(await row('NAT').locator('select').inputValue() == 'none', 'public network → LAN host: no masquerading');
+  await cancel();
+
+  // new line Server -> PCs: rule editor first, then the rule list
   await connect('Server', 'PCs');
+  ok(/New rule: Server — PCs/.test(await p.locator('.modal h4').innerText()), 'editor header names A and B');
   ok(await row('NAT').locator('select').inputValue() == 'none', 'LAN → LAN: no masquerading');
-  ok(!(await row('Services back').isVisible()), 'services back hidden for one way');
   await pick('Services', 'HTTPS');
-  await row('Direction').locator('select').selectOption('1');
-  await p.waitForTimeout(200);
-  ok(await row('Services back').isVisible(), 'services back shown for both ways');
-  ok(JSON.stringify(await chosen('Services back')).includes('HTTPS'), 'services back prefilled with HTTPS');
-  await row('Services back').locator('.cbi-dropdown').click();
-  await row('Services back').locator('.cbi-dropdown li[data-value][selected]:has-text("HTTPS")').first().click();
-  await row('Services back').locator('.cbi-dropdown li[data-value]:has-text("SSH")').first().click();
-  await p.keyboard.press('Escape').catch(() => {});
-  await p.click('.modal .fwd-form h5');
+  await row('Direction').locator('select').selectOption('both'); await p.waitForTimeout(200);
   const prev = await p.locator('.modal .fwd-preview').innerText();
-  ok(/option src_ip '10\.0\.2\.10'[\s\S]*option dest_port '22'/.test(prev) || /PCs → Server/.test(prev), 'preview has the reverse rule');
-  await p.screenshot({ path: path.join(out, 'bidir-dialog.png') });
-  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(500);
+  ok(/Server → PCs/.test(prev) && /PCs → Server/.test(prev), 'preview has rules for both directions');
+  await p.screenshot({ path: path.join(out, 'rule-dialog.png') });
+  await p.click('.modal button:has-text("Apply")'); await p.waitForSelector('.modal .fwd-pair'); await p.waitForTimeout(300);
+  ok(await p.locator('.modal .fwd-pair-obj strong').first().innerText() == 'Server', 'rule list opens after the first rule, A = Server');
+  ok(await p.locator('.modal select.fwd-dir').first().inputValue() == 'both', 'first rule shows A ↔ B');
+
+  // second rule DNS, B starts (A ← B)
+  await p.click('.modal button:has-text("+ Add rule")'); await p.waitForSelector('.modal .fwd-form');
+  await pick('Services', 'DNS');
+  await row('Direction').locator('select').selectOption('rev');
+  await p.click('.modal button:has-text("Apply")'); await p.waitForSelector('.modal .fwd-pair'); await p.waitForTimeout(300);
+  ok(await p.locator('.modal select.fwd-dir').count() == 2, 'two rules listed');
+  ok(await p.locator('.modal select.fwd-dir').nth(1).inputValue() == 'rev', 'DNS rule shows A ← B');
+  await p.screenshot({ path: path.join(out, 'rule-list.png') });
+  await p.locator('.modal select.fwd-dir').nth(1).selectOption('fwd'); await p.waitForTimeout(500);
+  ok(await p.locator('.modal select.fwd-dir').nth(1).inputValue() == 'fwd', 'direction changed inline to A → B');
+  await p.locator('.modal select.fwd-dir').nth(1).selectOption('rev'); await p.waitForTimeout(500);
+  await p.click('.modal button:has-text("Close")'); await p.waitForTimeout(300);
 
   ok(await edges('srv', 'pcs').count() == 1, 'one line for Server/PCs');
   const line = edges('srv', 'pcs').locator('.fwd-line');
   ok(await line.getAttribute('marker-start') && await line.getAttribute('marker-end'), 'arrows on both ends');
+  await p.screenshot({ path: path.join(out, 'rule-canvas.png') });
 
-  // separate PCs -> Server connection shares the same line
+  // drag the other way: same list, now seen from PCs
   await connect('PCs', 'Server');
-  await pick('Services', 'DNS');
-  await p.click('.modal button:has-text("Apply")'); await p.waitForTimeout(500);
-  ok(await edges('srv', 'pcs').count() == 1, 'still one line with a second connection');
-  await p.screenshot({ path: path.join(out, 'bidir-canvas.png') });
+  ok(await p.locator('.modal .fwd-pair-obj strong').first().innerText() == 'PCs', 'A = PCs when dragged from PCs');
+  ok(JSON.stringify(await p.locator('.modal select.fwd-dir').evaluateAll(l => l.map(x => x.value))) == '["both","fwd"]', 'directions seen from PCs');
+  await p.click('.modal button:has-text("Close")'); await p.waitForTimeout(300);
 
-  // dialog lists both; merge folds them into one connection
-  await edges('srv', 'pcs').locator('.fwd-badge').click(); await p.waitForSelector('.modal table');
-  ok(await p.locator('.modal tr.tr').count() == 3, 'dialog lists both connections');
-  ok(await p.locator('.modal button:has-text("+ PCs → Server")').count() == 1, 'add button for the other direction');
-  await p.screenshot({ path: path.join(out, 'bidir-bundle.png') });
-  await p.click('.modal button:has-text("Merge")'); await p.waitForTimeout(800);
   await p.click('.cbi-page-actions .cbi-button-apply'); await p.waitForTimeout(12000);
-  const conns = ssh("uci show fwdesktop | grep -E \"src='(srv|pcs)'\" | grep -v mqtest | wc -l; uci show fwdesktop | grep -E 'service_rev|bidir'");
-  ok(/^1\n/.test(conns) && /bidir='1'/.test(conns) && /b_ssh/.test(conns) && /b_dns/.test(conns), 'merged into one both-ways connection');
-
-  const fw = ssh("uci show firewall | grep -A12 \"name='Server → PCs'\" | grep -E 'src_ip|dest_port' | head -4; uci show firewall | grep -c \"name='PCs → Server'\"; fw4 check");
-  ok(/Ruleset passes/.test(fw) && /\n[1-9]/.test(fw), 'firewall applied with rules for both directions');
+  const conns = ssh("uci show fwdesktop | grep -c bidir; uci show fwdesktop | grep -c service_rev");
+  ok(conns == '1\n0', 'stored: one ↔ rule, no service_rev ' + JSON.stringify(conns));
+  const fw = ssh("uci show firewall | grep -c \"name='Server → PCs'\"; uci show firewall | grep -c \"name='PCs → Server'\"; fw4 check");
+  ok(/^1\n2\n[\s\S]*Ruleset passes/.test(fw), 'firewall: HTTPS Server → PCs, HTTPS + DNS PCs → Server ' + JSON.stringify(fw));
 
   ssh('cp /tmp/fwdesktop.bak /etc/config/fwdesktop; cp /tmp/firewall.bak /etc/config/firewall; fw4 reload >/dev/null 2>&1');
   ok(!errs.length, 'no page errors ' + JSON.stringify(errs));
