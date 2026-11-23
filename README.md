@@ -20,7 +20,8 @@ and `nat` sections.
 - **Services:** 36 built in (HTTP, DNS, SSH, WireGuard, SIP, RTMP, …), your own
   (TCP/UDP ports and ranges, ICMP types, any protocol such as ESP or IGMP) and
   service groups.
-- **Connections:** allow / reject / drop, masquerading, port forwarding with a
+- **Connections:** allow / reject / drop, masquerading or "prevent source rewrite"
+  (keep the original source although the target zone masquerades), port forwarding with a
   different public port, IPv4/IPv6 only, logging, extra fw4 options such as
   `limit=10/sec` or time ranges.
 - **One line per direction:** hover a line to see all its connections, click it

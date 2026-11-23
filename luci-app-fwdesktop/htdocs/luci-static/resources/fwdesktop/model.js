@@ -33,7 +33,10 @@
  *       list   service '<service id>'
  *       option bidir   '1'               (same services also from dest to src)
  *       option action  'ACCEPT' | 'REJECT' | 'DROP'
- *       option nat     'none' | 'masq' | 'dnat'
+ *       option nat     'none' | 'masq' | 'nosnat' | 'dnat'
+ *                                          (nosnat: "prevent source rewrite", an fw4
+ *                                          nat rule with target ACCEPT that exempts the
+ *                                          traffic from the zone's masquerading)
  *       option ext_port '8080'            (dnat: public port)
  *       option family  'ipv4' | 'ipv6'  (optional, both if unset)
  *       list   fwopt   'limit=10/sec'    (extra fw4 options passed through)
@@ -174,7 +177,7 @@ function fromSections(sections) {
 				service: toList(s.service),
 				bidir: s.bidir == '1',
 				action: ACTIONS.includes(s.action) ? s.action : 'ACCEPT',
-				nat: [ 'masq', 'dnat' ].includes(s.nat) ? s.nat : 'none',
+				nat: [ 'masq', 'nosnat', 'dnat' ].includes(s.nat) ? s.nat : 'none',
 				ext_port: s.ext_port || '',
 				family: [ 'ipv4', 'ipv6' ].includes(s.family) ? s.family : '',
 				fwopt: toList(s.fwopt),
@@ -530,6 +533,12 @@ function generate(model) {
 			errors.push('Masquerading only applies to forwarded traffic, not to the router itself');
 		if (c.nat == 'masq' && (srcEps.some(e => e.ipset) || dstEps.some(e => e.ipset)))
 			errors.push('Masquerading cannot be limited to an IP set (fw4 NAT rules do not support sets); use the zone instead');
+		if (c.nat == 'nosnat' && (srcEps.some(e => e.router) || dstEps.some(e => e.router)))
+			errors.push('Preventing source rewrite only applies to forwarded traffic, not to the router itself');
+		if (c.nat == 'nosnat' && (srcEps.some(e => e.ipset) || dstEps.some(e => e.ipset)))
+			errors.push('Preventing source rewrite cannot be limited to an IP set (fw4 NAT rules do not support sets); use the zone instead');
+		if (c.nat == 'nosnat' && c.family == 'ipv6')
+			errors.push('Preventing source rewrite is only supported for IPv4');
 		if (c.nat == 'dnat' && dstEps.some(e => e.ipset))
 			errors.push('A port forward target must be a host, not an IP set');
 
@@ -632,7 +641,9 @@ function generate(model) {
 						sections.push(withExtra(compact(rule)));
 					}
 
-					if (nat == 'masq' && c.action == 'ACCEPT' && c.family != 'ipv6') {
+					/* masq: rewrite the source; nosnat: exempt from the zone's masquerading
+					 * (fw4 puts nat rules before the zone masquerade rule in srcnat_<zone>) */
+					if ((nat == 'masq' || nat == 'nosnat') && c.action == 'ACCEPT' && c.family != 'ipv6') {
 						/* fw4 nat sections take a single src_ip / dest_ip each */
 						const sIps = s.addrs ? s.addrs.filter(a => !isIPv6(a)) : [ null ];
 						const dIps = d.addrs ? d.addrs.filter(a => !isIPv6(a)) : [ null ];
@@ -641,13 +652,13 @@ function generate(model) {
 								sections.push(compact({
 									'.type': 'nat',
 									'.name': base + 'n' + (n++),
-									name: ttl + ' (NAT)',
+									name: ttl + (nat == 'masq' ? ' (NAT)' : ' (no NAT)'),
 									family: 'ipv4',
 									src: d.zone,
 									src_ip: sip,
 									dest_ip: dip,
 									proto: 'all',
-									target: 'MASQUERADE'
+									target: nat == 'masq' ? 'MASQUERADE' : 'ACCEPT'
 								}));
 					}
 				}
@@ -663,10 +674,18 @@ function generate(model) {
 		}
 	}
 
+	/* "prevent source rewrite" must come before any masquerade rule of the
+	 * same zone, so all ACCEPT nat sections move in front of the first nat
+	 * section (nat order is independent from rule order in fw4) */
+	const isNoSnat = s => s['.type'] == 'nat' && s.target == 'ACCEPT';
+	const firstNat = sections.findIndex(s => s['.type'] == 'nat');
+	const ordered = firstNat < 0 ? sections : sections.slice(0, firstNat)
+		.concat(sections.filter(isNoSnat), sections.slice(firstNat).filter(s => !isNoSnat(s)));
+
 	/* both directions may report the same problem */
 	const seenProblems = {};
 	return {
-		sections: sections,
+		sections: ordered,
 		problems: problems.filter(p => {
 			const k = p.conn + '\n' + p.msg;
 			return seenProblems[k] ? false : (seenProblems[k] = true);

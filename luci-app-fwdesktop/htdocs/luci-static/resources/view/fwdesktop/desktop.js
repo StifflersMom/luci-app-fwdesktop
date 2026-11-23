@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-27';
+const ASSET_REV = '1.0.0-28';
 
 const RT_TABLES = '/etc/iproute2/rt_tables';
 
@@ -771,6 +771,7 @@ return view.extend({
 	edgeLabel(c) {
 		let s = this.connServices(c).join(', ');
 		if (c.nat == 'masq') s = 'NAT · ' + s;
+		if (c.nat == 'nosnat') s = _('no NAT') + ' · ' + s;
 		if (c.nat == 'dnat') s = _('Forward') + ' · ' + s;
 		return s;
 	},
@@ -908,6 +909,7 @@ return view.extend({
 						bd.rev ? E('strong', [ this.dirSymbol(c, bd.src) + ' ' ]) : '',
 						this.connServices(c).join(', '),
 						c.nat == 'masq' ? E('em', [ ' · NAT' ]) : '',
+						c.nat == 'nosnat' ? E('em', [ ' · ' + _('no source rewrite') ]) : '',
 						c.nat == 'dnat' ? E('em', [ ' · ' + _('port forward') + (c.ext_port ? ' ' + c.ext_port : '') ]) : '',
 						c.family ? E('em', [ ' · ' + (c.family == 'ipv4' ? 'IPv4' : 'IPv6') ]) : '',
 						c.enabled ? '' : E('em', [ ' · ' + _('disabled') ]),
@@ -1517,6 +1519,7 @@ return view.extend({
 		const wNat = new ui.Select(c.nat, {
 			none: _('None'),
 			masq: _('Masquerade (hide source behind the router address; for A ↔ B only A → B)'),
+			nosnat: _('Prevent source rewrite (keep the original source address although zone B masquerades; for A ↔ B only A → B)'),
 			dnat: _('Port forwarding (publish target host on the router)')
 		}, { optional: false, sort: false });
 		const wExt = new ui.Textfield(c.ext_port, { optional: true, datatype: 'list(portrange)', placeholder: _('same as service port') });
@@ -1677,7 +1680,7 @@ return view.extend({
 				'change': ev => setDir(c, ev.target.value)
 			}, Object.keys(DIRS).map(k => E('option', { 'value': k, 'selected': k == cur ? '' : null }, [ DIRS[k] ])));
 			const opts = [
-				{ none: '', masq: _('Masquerade'), dnat: _('Port forward') + (c.ext_port ? ' ' + c.ext_port : '') }[c.nat],
+				{ none: '', masq: _('Masquerade'), nosnat: _('No source rewrite'), dnat: _('Port forward') + (c.ext_port ? ' ' + c.ext_port : '') }[c.nat],
 				c.family ? (c.family == 'ipv4' ? 'IPv4' : 'IPv6') : '',
 				c.log ? _('log') : '',
 				(c.fwopt || []).join(' ')
@@ -1841,6 +1844,8 @@ return view.extend({
 		}).join(', ');
 		let s = '%s → %s: %s, %s'.format(lbl(c.src), lbl(c.dest), svcs, ACTION_LABELS[c.action]);
 		if (c.bidir) s += ', ' + _('both ways');
+		if (c.nat == 'masq') s += ', ' + _('masquerade');
+		if (c.nat == 'nosnat') s += ', ' + _('no source rewrite');
 		if (c.nat == 'dnat') s += ', ' + _('port forward') + (c.ext_port ? ' ' + c.ext_port : '');
 		if (c.family) s += ', ' + (c.family == 'ipv4' ? 'IPv4' : 'IPv6');
 		if (c.fwopt && c.fwopt.length) s += ', ' + c.fwopt.join(' ');
@@ -1950,7 +1955,7 @@ return view.extend({
 				E('td', { 'class': 'td' }, [ c.bidir ? E('span', { 'title': _('both ways') }, [ '↔ ' ]) : '', dob ? dob.label : '?' ]),
 				E('td', { 'class': 'td' }, this.connServices(c).map(l => E('span', { 'class': 'fwd-pill' }, [ l ]))),
 				E('td', { 'class': 'td' }, [ E('span', { 'class': 'fwd-pill ' + c.action }, [ ACTION_LABELS[c.action] ]) ]),
-				E('td', { 'class': 'td' }, [ { none: '-', masq: _('Masquerade'), dnat: _('Port forward') + (c.ext_port ? ' (' + c.ext_port + ')' : '') }[c.nat] ]),
+				E('td', { 'class': 'td' }, [ { none: '-', masq: _('Masquerade'), nosnat: _('No source rewrite'), dnat: _('Port forward') + (c.ext_port ? ' (' + c.ext_port + ')' : '') }[c.nat] ]),
 				E('td', { 'class': 'td' }, [ c.label || '' ].concat(prob ? prob.map(p => E('div', { 'class': 'fwd-problem' }, [ p ])) : [])),
 				E('td', { 'class': 'td fwd-actions' }, [
 					this.smallBtn('▲', '', () => this.moveConnection(cid, -1), i == 0),
