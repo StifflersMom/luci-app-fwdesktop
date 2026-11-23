@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-28';
+const ASSET_REV = '1.0.0-29';
 
 const RT_TABLES = '/etc/iproute2/rt_tables';
 

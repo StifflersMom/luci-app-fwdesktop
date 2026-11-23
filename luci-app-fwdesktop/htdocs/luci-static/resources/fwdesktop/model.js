@@ -654,7 +654,11 @@ function generate(model) {
 									'.name': base + 'n' + (n++),
 									name: ttl + (nat == 'masq' ? ' (NAT)' : ' (no NAT)'),
 									family: 'ipv4',
-									src: d.zone,
+									/* a "no rewrite" rule towards known addresses goes into fw4's main
+									 * srcnat chain (src '*'): there it runs before the zone chain, whose
+									 * NAT loopback SNAT rules of port forwards come before all nat rules
+									 * and also catch direct LAN connections. dest_ip pins the egress. */
+									src: (nat == 'nosnat' && dip) ? '*' : d.zone,
 									src_ip: sip,
 									dest_ip: dip,
 									proto: 'all',

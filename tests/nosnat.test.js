@@ -15,7 +15,7 @@ assert.deepStrictEqual(g.problems, []);
 const nat = g.sections.filter(s => s['.type'] == 'nat');
 assert.strictEqual(nat.length, 1); // only A → B, IPv6 address skipped
 assert.deepStrictEqual(nat[0], { '.type': 'nat', '.name': nat[0]['.name'], name: 'LAN → VPN site (no NAT)', family: 'ipv4',
-  src: 'vpn', src_ip: '192.168.1.0/24', dest_ip: '10.8.0.0/24', proto: 'all', target: 'ACCEPT' });
+  src: '*', src_ip: '192.168.1.0/24', dest_ip: '10.8.0.0/24', proto: 'all', target: 'ACCEPT' });
 assert.strictEqual(g.sections.filter(s => s['.type'] == 'rule').length, 2);
 
 // round trip keeps the value
@@ -42,4 +42,10 @@ console.log('ALL OK');
   const nats = g2.sections.filter(s => s['.type'] == 'nat').map(s => s.target);
   assert.deepStrictEqual(nats, ['ACCEPT', 'MASQUERADE']);
   console.log('ORDER OK');
+  // whole zone as target: no dest_ip, so the rule stays in the zone's chain
+  const g3 = M.generate(M.fromSections(base.concat([
+    { '.type': 'object', '.name': 'inet', type: 'zone', label: 'Internet', zone: 'wan' },
+    { '.type': 'connection', '.name': 'z', src: 'lan', dest: 'inet', service: ['b_any'], action: 'ACCEPT', nat: 'nosnat' },
+  ])));
+  assert.strictEqual(g3.sections.find(s => s['.type'] == 'nat').src, 'wan');
 }
