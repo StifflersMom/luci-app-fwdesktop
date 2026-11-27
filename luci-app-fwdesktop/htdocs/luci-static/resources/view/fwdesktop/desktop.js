@@ -9,9 +9,36 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-30';
+const ASSET_REV = '1.0.0-31';
 
 const RT_TABLES = '/etc/iproute2/rt_tables';
+
+/* finds ASSET_REV in a freshly fetched copy of this file */
+const ASSET_REV_RE = /ASSET_REV\s*=\s*'([^']+)'/;
+
+/*
+ * LuCI loads view and class files with ?v=<luci-base version>, which does not
+ * change when only this app is updated, and uhttpd sends no Cache-Control.
+ * Browsers then keep running the old app (even after Ctrl+Shift+R, which does
+ * not cover the script requests LuCI makes later). Revalidate our files under
+ * the exact URLs LuCI uses (cheap 304 when unchanged) and reload once if a
+ * newer version was installed.
+ */
+function refreshStaleAssets() {
+	const url = name => '%s/%s.js%s'.format(L.env.base_url, name, L.env.resource_version ? '?v=' + L.env.resource_version : '');
+	if (!window.fetch || !L.env.base_url) return;
+	fetch(url('fwdesktop/model'), { cache: 'no-cache', credentials: 'same-origin' }).catch(() => {});
+	fetch(url('view/fwdesktop/desktop'), { cache: 'no-cache', credentials: 'same-origin' })
+		.then(res => res.ok ? res.text() : '')
+		.then(text => {
+			const m = ASSET_REV_RE.exec(text);
+			if (!m || m[1] == ASSET_REV) return;
+			let tried = null;
+			try { tried = sessionStorage.getItem('fwdesktop.reloaded'); sessionStorage.setItem('fwdesktop.reloaded', m[1]); } catch (e) {}
+			if (tried != m[1]) location.reload();
+		})
+		.catch(() => {});
+}
 
 /* defined here because jsmin cannot parse a regex literal right after '=>' */
 const FWOPT_RE = /^[a-z_]+=.+/;
@@ -162,6 +189,8 @@ return view.extend({
 			'rel': 'stylesheet',
 			'href': L.resource('fwdesktop/desktop.css') + '?v=' + ASSET_REV + (L.env.resource_version ? '-' + L.env.resource_version : '')
 		}));
+
+		refreshStaleAssets();
 
 		this.statusEl = E('span', { 'class': 'fwd-status' });
 		this.buildCanvas();
