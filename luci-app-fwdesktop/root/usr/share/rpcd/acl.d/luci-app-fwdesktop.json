@@ -28,7 +28,8 @@
 					"exec"
 				],
 				"luci-rpc": [
-					"getHostHints"
+					"getHostHints",
+					"getNetworkDevices"
 				],
 				"network.interface": [
 					"dump"

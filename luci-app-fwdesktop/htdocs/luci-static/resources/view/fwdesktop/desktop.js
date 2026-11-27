@@ -9,7 +9,7 @@
 'require fwdesktop.model as fwm';
 
 /* bump together with PKG_RELEASE so browsers fetch the matching stylesheet */
-const ASSET_REV = '1.0.0-29';
+const ASSET_REV = '1.0.0-30';
 
 const RT_TABLES = '/etc/iproute2/rt_tables';
 
@@ -24,6 +24,12 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const callHostHints = rpc.declare({
 	object: 'luci-rpc',
 	method: 'getHostHints',
+	expect: { '': {} }
+});
+
+const callNetworkDevices = rpc.declare({
+	object: 'luci-rpc',
+	method: 'getNetworkDevices',
 	expect: { '': {} }
 });
 
@@ -127,7 +133,8 @@ return view.extend({
 			uci.load([ 'fwdesktop', 'firewall', 'network' ]),
 			L.resolveDefault(callHostHints(), {}),
 			L.resolveDefault(callNetworkDump(), []),
-			L.resolveDefault(fs.read(RT_TABLES), '')
+			L.resolveDefault(fs.read(RT_TABLES), ''),
+			L.resolveDefault(callNetworkDevices(), {})
 		]);
 	},
 
@@ -138,6 +145,7 @@ return view.extend({
 		this.ifaces = data[2] || [];
 		this.rtTables = this.parseRtTables(data[3] || '');
 		this.rtAll = this.parseRtAll(data[3] || '');
+		this.netDevices = data[4] || {};
 		this.rtPending = {};
 		this.zones = uci.sections('firewall', 'zone').map(z => z.name).filter(Boolean);
 		this.model = fwm.fromSections(uci.sections('fwdesktop'));
@@ -2025,6 +2033,19 @@ return view.extend({
 		return c;
 	},
 
+	/* kernel devices for a zone's "covered devices" (aliases like @lan are no devices) */
+	deviceChoices(extra) {
+		const c = {};
+		for (const name of Object.keys(this.netDevices || {}).sort())
+			if (name != 'lo' && name.charAt(0) != '@')
+				c[name] = name + (this.netDevices[name].up ? '' : ' (' + _('down') + ')');
+		for (const sec of uci.sections('network', 'device'))
+			if (sec.name && !c[sec.name]) c[sec.name] = sec.name;
+		for (const name of extra || [])
+			if (!c[name]) c[name] = name;
+		return c;
+	},
+
 	editZone(sid) {
 		const isNew = !sid;
 		const cur = isNew ? { input: 'ACCEPT', output: 'ACCEPT', forward: 'REJECT' } : (uci.get('firewall', sid) || {});
@@ -2043,6 +2064,12 @@ return view.extend({
 		const wMasq = new ui.Checkbox(cur.masq == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
 		const wMss = new ui.Checkbox(cur.mtu_fix == '1' ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
 		const wNets = new ui.Dropdown(fwm.toList(cur.network), this.networkChoices(), { multiple: true, optional: true, display_items: 5, placeholder: _('-- none --') });
+		const curDevs = fwm.toList(cur.device);
+		const wDevs = new ui.Dropdown(curDevs, this.deviceChoices(curDevs), {
+			multiple: true, optional: true, create: true, display_items: 5, placeholder: _('-- none --'),
+			maxlength: 16, custom_placeholder: _('-- custom, e.g. tun+ --')
+		});
+		const wSubnets = new ui.DynamicList(fwm.toList(cur.subnet), null, { datatype: 'neg(cidr("true"))', optional: true, placeholder: '192.168.100.0/24' });
 		const wTo = new ui.Dropdown(fwdTo, otherZones, { multiple: true, optional: true, display_items: 5, placeholder: _('-- none --') });
 		const wFrom = new ui.Dropdown(fwdFrom, otherZones, { multiple: true, optional: true, display_items: 5, placeholder: _('-- none --') });
 		const wObj = new ui.Checkbox('1', { value_enabled: '1', value_disabled: '0' });
@@ -2056,6 +2083,8 @@ return view.extend({
 			this.formRow(_('Masquerading'), wMasq, _('Hide traffic leaving through this zone behind the router address (typical for WAN zones).')),
 			this.formRow(_('MSS clamping'), wMss),
 			this.formRow(_('Covered networks'), wNets, _('A network can belong to one zone only; it is removed from its previous zone.')),
+			this.formRow(_('Covered devices'), wDevs, _('Use this zone for traffic on these raw devices, e.g. VPN or VLAN devices that have no network interface. Wildcards like "tun+" and negation ("!eth0") are allowed.')),
+			this.formRow(_('Covered subnets'), wSubnets, _('Use this zone for traffic from or to these subnets instead of (or in addition to) networks and devices. A leading "!" excludes a subnet.')),
 			this.formRow(_('Allow forward to'), wTo, _('Zone forwardings: all traffic from this zone to these zones is allowed (shown as dotted lines on the desktop).')),
 			this.formRow(_('Allow forward from'), wFrom),
 			isNew ? this.formRow(_('Add to desktop'), wObj, _('Create a zone object for the new zone.')) : '',
@@ -2080,6 +2109,10 @@ return view.extend({
 			uci.set('firewall', id, 'masq', wMasq.getValue() == '1' ? '1' : null);
 			uci.set('firewall', id, 'mtu_fix', wMss.getValue() == '1' ? '1' : null);
 			uci.set('firewall', id, 'network', nets.length ? nets : null);
+			const devs = fwm.toList(wDevs.getValue()).map(d => d.trim()).filter(Boolean);
+			const subnets = fwm.toList(wSubnets.getValue()).map(d => d.trim()).filter(Boolean);
+			uci.set('firewall', id, 'device', devs.length ? devs : null);
+			uci.set('firewall', id, 'subnet', subnets.length ? subnets : null);
 
 			/* a network belongs to one zone only */
 			for (const z of uci.sections('firewall', 'zone')) {
@@ -2187,7 +2220,11 @@ return view.extend({
 			const to = fwds.filter(f => f.src == z.name).map(f => f.dest), from = fwds.filter(f => f.dest == z.name).map(f => f.src);
 			return E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td' }, [ E('strong', [ z.name || '?' ]), z.masq == '1' ? E('div', { 'class': 'fwd-tip-sub' }, [ _('masquerading') ]) : '' ]),
-				E('td', { 'class': 'td' }, [ fwm.toList(z.network).join(', ') || E('em', [ _('none') ]) ]),
+				E('td', { 'class': 'td' }, [
+					fwm.toList(z.network).join(', ') || ((z.device || z.subnet) ? '' : E('em', [ _('none') ])),
+					fwm.toList(z.device).length ? E('div', { 'class': 'fwd-tip-sub' }, [ _('Devices: %s').format(fwm.toList(z.device).join(', ')) ]) : '',
+					fwm.toList(z.subnet).length ? E('div', { 'class': 'fwd-tip-sub' }, [ _('Subnets: %s').format(fwm.toList(z.subnet).join(', ')) ]) : ''
+				]),
 				E('td', { 'class': 'td' }, [ pill(z.input), ' ', pill(z.output), ' ', pill(z.forward) ]),
 				E('td', { 'class': 'td' }, [
 					to.length ? E('div', [ '→ ' + to.join(', ') ]) : '',
